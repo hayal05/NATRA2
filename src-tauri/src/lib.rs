@@ -537,10 +537,6 @@ async fn dashboard_summary(state: State<'_, AppDb>) -> Result<DashboardSummary, 
 }
 
 
-async fn scalar_tx_f64<T: turso::IntoParams>(tx: &turso::Transaction<'_>, sql: &str, params: T) -> Result<f64,String> {
-    let mut rows=tx.query(sql,params).await.map_err(|e|e.to_string())?;
-    if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<f64>(0).unwrap_or(0.0)) } else { Ok(0.0) }
-}
 
 async fn scalar_f64(c:&Connection, sql:&str)->Result<f64,String>{
     let mut rows=c.query(sql,()).await.map_err(|e|e.to_string())?;
@@ -630,7 +626,18 @@ async fn record_return(state: State<'_, AppDb>, input: ReturnInput) -> Result<St
     let unit_price:f64 = row.get(2).map_err(|e| e.to_string())?;
     let unit_cost:f64 = row.get(3).map_err(|e| e.to_string())?;
     drop(rows);
-    let already_returned:f64 = scalar_tx_f64(&tx, "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2", params![input.sale_reference.clone(), input.sku.clone()]).await?;
+    let mut returned_rows = tx
+        .query(
+            "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2",
+            params![input.sale_reference.clone(), input.sku.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let already_returned:f64 = match returned_rows.next().await.map_err(|e| e.to_string())? {
+        Some(row) => row.get::<f64>(0).unwrap_or(0.0),
+        None => 0.0,
+    };
+    drop(returned_rows);
     if input.qty > sold_qty - already_returned { return Err("Return quantity exceeds the remaining returnable quantity".into()); }
     let mut pr = tx.query("SELECT stock FROM products WHERE sku=?1 AND active=1", params![input.sku.clone()]).await.map_err(|e| e.to_string())?;
     let prow = pr.next().await.map_err(|e| e.to_string())?.ok_or("Product not found")?;
