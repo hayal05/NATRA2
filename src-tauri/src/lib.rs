@@ -962,7 +962,7 @@ fn database_path(app: &AppHandle) -> PathBuf {
 pub fn run() {
     tauri::Builder::default()
       .setup(|app| {
-        let path=database_path(app);
+        let path=database_path(app.handle());
         let path_string=path.to_string_lossy().to_string();
         let (url, token) = cloud_credentials();
 
