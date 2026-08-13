@@ -1,0 +1,2 @@
+-- Schema is also initialized by the Rust bootstrap routine.
+-- Keep this file as the canonical migration source for the production migration system.
