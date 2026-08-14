@@ -537,7 +537,7 @@ async fn dashboard_summary(state: State<'_, AppDb>) -> Result<DashboardSummary, 
 }
 
 
-async fn scalar_tx_f64<T: turso::IntoParams>(tx: &turso::Transaction<'_>, sql: &str, params: T) -> Result<f64,String> {
+async fn scalar_tx_f64<T: turso::IntoParams>(tx: &turso::transaction::Transaction<'_>, sql: &str, params: T) -> Result<f64,String> {
     let mut rows=tx.query(sql,params).await.map_err(|e|e.to_string())?;
     if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<f64>(0).unwrap_or(0.0)) } else { Ok(0.0) }
 }
@@ -1001,7 +1001,7 @@ fn database_path(app: &AppHandle) -> PathBuf {
 pub fn run() {
     tauri::Builder::default()
       .setup(|app| {
-        let path=database_path(app);
+        let path=database_path(app.handle());
         let path_string=path.to_string_lossy().to_string();
         let (url, token) = cloud_credentials();
 
