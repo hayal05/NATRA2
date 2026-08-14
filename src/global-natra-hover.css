@@ -1,0 +1,10 @@
+:root{--natra-blue:#246bfd;--natra-blue-dark:#1957d5;--natra-blue-soft:rgba(36,107,253,.12)}
+/* Global NATRA interaction language: keyboard focus + pointer hover. */
+button:not(:disabled),a[role="button"],.btn,.button,[class*="btn"]{transition:background-color .16s ease,color .16s ease,border-color .16s ease,box-shadow .16s ease,transform .12s ease,filter .16s ease}
+button:not(:disabled):hover,a[role="button"]:hover,.btn:hover,.button:hover,[class*="btn"]:hover{border-color:var(--natra-blue)!important;color:var(--natra-blue)!important;box-shadow:0 0 0 3px var(--natra-blue-soft)!important}
+button:not(:disabled):active,a[role="button"]:active,.btn:active,.button:active,[class*="btn"]:active{background-color:var(--natra-blue-dark)!important;border-color:var(--natra-blue-dark)!important;color:#fff!important;transform:translateY(1px)}
+button:focus-visible,a[role="button"]:focus-visible,.btn:focus-visible,.button:focus-visible,[class*="btn"]:focus-visible{outline:2px solid var(--natra-blue)!important;outline-offset:2px;box-shadow:0 0 0 4px var(--natra-blue-soft)!important}
+/* Preserve white text on explicitly branded primary controls while hovered. */
+button.primary:hover,button[type="submit"]:hover,.btn-primary:hover,.button-primary:hover{background:var(--natra-blue)!important;color:#fff!important;box-shadow:0 8px 20px rgba(36,107,253,.28)!important}
+/* Sidebar/navigation hover. */
+.nav-item:hover,.sidebar button:hover,.sidebar a:hover,.sidebar .nav-link:hover{color:var(--natra-blue)!important;background:var(--natra-blue-soft)!important}
