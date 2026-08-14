@@ -523,7 +523,7 @@ async fn dashboard_summary(state: State<'_, AppDb>) -> Result<DashboardSummary, 
     let today_sales: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(revenue),0) FROM sales WHERE date(sale_date)=date('now','localtime')").await?;
     let gross_profit: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(profit),0) FROM sales WHERE date(sale_date)=date('now','localtime')").await?;
     let cash_in: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('INCOME','SALE') AND account != 'Credit'").await?;
-    let cash_out: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('EXPENSE','PURCHASE','PAYMENT')").await?;
+    let cash_out: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('EXPENSE','PURCHASE','REFUND')").await?;
     let low_stock: i64 = scalar_i64(&c, "SELECT COUNT(*) FROM products WHERE active=1 AND stock<=min_stock").await?;
     let receivables: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1").await?;
     let mut rows = c.query("SELECT p.name,COALESCE(SUM(si.qty),0),COALESCE(SUM(si.line_revenue),0),COALESCE(SUM(si.line_profit),0) FROM sale_items si JOIN products p ON p.sku=si.sku GROUP BY si.sku ORDER BY SUM(si.line_revenue) DESC LIMIT 5", ()).await.map_err(|e| e.to_string())?;
