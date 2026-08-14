@@ -6,7 +6,7 @@ function applyNatraBranding() {
   const databaseDetail = document.querySelector('#modeDetail');
   if (databaseDetail) databaseDetail.remove();
 
-  // Replace the old footer branding completely.
+  // Remove the old main footer branding.
   const footer = document.querySelector('.footer');
   if (footer) footer.remove();
 
@@ -14,10 +14,10 @@ function applyNatraBranding() {
   if (!branding) {
     branding = document.createElement('div');
     branding.className = 'natra-sidebar-branding';
-    branding.textContent = 'NATRA Technology';
     sidebar.appendChild(branding);
   }
 
+  branding.innerHTML = '<b>Powered by NATRA Technology</b><span>Addis Ababa ©2026</span>';
   return true;
 }
 
@@ -36,20 +36,22 @@ style.textContent = `
     padding: 10px 8px 4px;
     border-top: 1px solid rgba(255,255,255,.12);
     color: #ffffff;
-    font-size: 12px;
-    font-weight: 900;
+    font-size: 9px;
+    line-height: 1.5;
     letter-spacing: .01em;
     text-align: center;
   }
-  .sidebar-collapsed .natra-sidebar-branding {
-    font-size: 0;
-    padding-left: 0;
-    padding-right: 0;
-  }
-  .sidebar-collapsed .natra-sidebar-branding::after {
-    content: 'N';
-    font-size: 13px;
+  .sidebar .natra-sidebar-branding b {
+    display: block;
     font-weight: 900;
+  }
+  .sidebar .natra-sidebar-branding span {
+    display: block;
+    color: #9eb1c9;
+    font-weight: 500;
+  }
+  .sidebar-collapsed .natra-sidebar-branding {
+    font-size: 8px;
   }
 `;
 document.head.appendChild(style);
