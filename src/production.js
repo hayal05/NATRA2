@@ -1,13 +1,12 @@
-
 /**
  * v0.5 production UI helpers.
  * Import from main.js when wiring the final screens.
  */
 import { invoke } from "@tauri-apps/api/core";
 
-export async function recordCustomerPayment(customerId, amount, account = "Cash", note = "") {
+export async function recordCustomerPayment(customerId, amount, account = "Cash") {
   return invoke("record_customer_payment", {
-    p: { customer_id: Number(customerId), amount: Number(amount), account, note }
+    input: { customer_id: Number(customerId), amount: Number(amount), account }
   });
 }
 
