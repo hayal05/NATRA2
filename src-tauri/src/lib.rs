@@ -619,7 +619,28 @@ async fn record_purchase(state: State<'_, AppDb>, input: PurchaseInput) -> Resul
     .await
     .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_in,balance_after,unit_cost,created_at) VALUES(?,?,?,?,?,?,?)",params![reference.clone(),input.sku.clone(),"PURCHASE",input.qty,new_stock,input.unit_cost,now.clone()]).await.map_err(|e|e.to_string())?;
-    tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![reference.clone(),"PURCHASE","Inventory purchase",total,input.account.trim(),now]).await.map_err(|e|e.to_string())?;
+    tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![reference.clone(),"PURCHASE","Inventory purchase",total,input.account.trim(),now.clone()]).await.map_err(|e|e.to_string())?;
+    let account_code = match input.account.trim() {
+        "Cash" => "1000",
+        "Bank" => "1010",
+        "Mobile Money" => "1020",
+        _ => return Err("Invalid purchase payment account".into()),
+    };
+    let journal_lines: [(&str, f64, f64, &str); 2] = [
+        ("1200", total, 0.0, "Inventory purchased"),
+        (account_code, 0.0, total, "Purchase payment"),
+    ];
+    accounting::post_in_transaction(
+        &tx,
+        &reference,
+        &now,
+        "Purchase accounting entry",
+        "PURCHASE",
+        Some(&reference),
+        &journal_lines,
+    )
+    .await?;
+
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
