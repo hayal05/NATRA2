@@ -11,6 +11,14 @@ if "Purchase accounting entry" in block:
     print("Purchase accounting integration already present")
     raise SystemExit(0)
 
+# Turso's IntoValue consumes String parameters. The purchase transaction
+# still needs `now` for the journal entry, so keep an owned clone for the
+# cash-transaction insert.
+block = block.replace(
+    "input.account.trim(),now]",
+    "input.account.trim(),now.clone()]",
+)
+
 journal_code = '''    let account_code = match input.account.trim() {
         "Cash" => "1000",
         "Bank" => "1010",
