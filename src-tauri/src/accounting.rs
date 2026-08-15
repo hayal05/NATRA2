@@ -42,6 +42,51 @@ pub async fn init_schema(c: &Connection) -> Result<(), String> {
       CREATE INDEX IF NOT EXISTS idx_journal_entries_date ON journal_entries(entry_date);
       CREATE INDEX IF NOT EXISTS idx_journal_lines_entry ON journal_lines(journal_entry_id);
       CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account_code);
+
+      DROP TRIGGER IF EXISTS trg_journal_entries_immutable;
+      CREATE TRIGGER trg_journal_entries_immutable
+      BEFORE UPDATE ON journal_entries
+      WHEN OLD.status = 'VOID'
+        OR (OLD.status = 'POSTED' AND (
+          NEW.reference <> OLD.reference
+          OR NEW.description <> OLD.description
+          OR NEW.entry_date <> OLD.entry_date
+          OR NEW.created_at <> OLD.created_at
+          OR NEW.status NOT IN ('POSTED','VOID')
+        ))
+      BEGIN
+        SELECT RAISE(ABORT, 'Posted journal entries are immutable; use a reversal or void workflow');
+      END;
+
+      DROP TRIGGER IF EXISTS trg_journal_entries_delete_control;
+      CREATE TRIGGER trg_journal_entries_delete_control
+      BEFORE DELETE ON journal_entries
+      WHEN OLD.status <> 'DRAFT'
+      BEGIN
+        SELECT RAISE(ABORT, 'Posted or void journal entries cannot be deleted');
+      END;
+
+      DROP TRIGGER IF EXISTS trg_journal_lines_immutable;
+      CREATE TRIGGER trg_journal_lines_immutable
+      BEFORE UPDATE ON journal_lines
+      WHEN EXISTS (
+        SELECT 1 FROM journal_entries e
+        WHERE e.id = OLD.journal_entry_id AND e.status <> 'DRAFT'
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'Journal lines belonging to posted or void entries are immutable');
+      END;
+
+      DROP TRIGGER IF EXISTS trg_journal_lines_delete_control;
+      CREATE TRIGGER trg_journal_lines_delete_control
+      BEFORE DELETE ON journal_lines
+      WHEN EXISTS (
+        SELECT 1 FROM journal_entries e
+        WHERE e.id = OLD.journal_entry_id AND e.status <> 'DRAFT'
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'Journal lines belonging to posted or void entries cannot be deleted');
+      END;
     "#).await.map_err(|e| e.to_string())?;
 
     let now = Utc::now().to_rfc3339();
