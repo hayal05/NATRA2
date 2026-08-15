@@ -96,6 +96,29 @@ pub async fn init_schema(c: &Connection) -> Result<(), String> {
                0,NEW.amount,NEW.created_at
         FROM journal_entries WHERE reference=NEW.reference;
       END;
+
+      DROP TRIGGER IF EXISTS trg_refund_cash_to_journal;
+
+      CREATE TRIGGER trg_refund_cash_to_journal
+      AFTER INSERT ON cash_transactions
+      WHEN NEW.tx_type = 'REFUND'
+      BEGIN
+        SELECT RAISE(ABORT, 'Unsupported refund cash account')
+        WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
+
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference,'Customer sales refund',NEW.created_at,'POSTED',NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'4000',NEW.amount,0,NEW.created_at
+        FROM journal_entries WHERE reference=NEW.reference;
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,
+               CASE NEW.account WHEN 'Cash' THEN '1000' WHEN 'Bank' THEN '1010' WHEN 'Mobile Money' THEN '1020' END,
+               0,NEW.amount,NEW.created_at
+        FROM journal_entries WHERE reference=NEW.reference;
+      END;
     "#).await.map_err(|e| e.to_string())?;
 
     Ok(())
