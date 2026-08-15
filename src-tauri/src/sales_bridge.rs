@@ -1,5 +1,5 @@
 use chrono::Utc;
-use crate::{accounting_core::JournalEntry, sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
+use crate::{sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
 use std::collections::HashSet;
 use tauri::State;
 use turso::params;
@@ -14,36 +14,9 @@ fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str
     }
 }
 
-async fn persist_journal<T>(tx: &T, entry: &JournalEntry) -> Result<(), String>
-where
-    T: JournalStore,
-{
-    tx.execute(
-        "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?,?,?,?,?,?,?)",
-        params![entry.id.clone(),entry.reference.clone(),format!("{:?}", entry.event_type),entry.description.clone(),entry.posted_at.clone(),format!("{:?}", entry.status),entry.reversal_of.clone()],
-    ).await?;
-    for line in &entry.lines {
-        tx.execute(
-            "INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)",
-            params![entry.id.clone(), line.account.clone(), line.debit, line.credit],
-        ).await?;
-    }
-    Ok(())
-}
-
-trait JournalStore {
-    fn execute<'a>(&'a self, sql: &'a str, params: turso::Params) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
-}
-
-impl JournalStore for turso::Transaction<'_> {
-    fn execute<'a>(&'a self, sql: &'a str, params: turso::Params) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move { turso::Transaction::execute(self, sql, params).await.map(|_| ()).map_err(|e| e.to_string()) })
-    }
-}
-
 /// Real application sales command. The UI contract remains `record_sale`.
-/// All financial consequences are produced by Sales Core and persisted as a
-/// balanced double-entry journal before the transaction is committed.
+/// Sales Core produces the complete balanced journal; this command atomically
+/// persists that journal together with the operational sale and inventory data.
 #[tauri::command]
 pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
     if input.items.is_empty() { return Err("Sale has no items".into()); }
@@ -61,7 +34,9 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
     let tx = c.transaction().await.map_err(|e| e.to_string())?;
     let reference = format!("SAL-{}", Uuid::new_v4().simple());
     let now = Utc::now().to_rfc3339();
-    let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine { sku: item.sku.trim().to_string(), qty: item.qty, unit_price: item.unit_price }).collect();
+    let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine {
+        sku: item.sku.trim().to_string(), qty: item.qty, unit_price: item.unit_price,
+    }).collect();
 
     let mut opening_inventory = Vec::with_capacity(lines.len());
     for line in &lines {
@@ -96,7 +71,11 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
       CREATE INDEX IF NOT EXISTS idx_journal_lines_journal ON journal_lines(journal_id);
       CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account);
     "#).await.map_err(|e| e.to_string())?;
-    persist_journal(&tx, &posting.journal).await?;
+
+    tx.execute("INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?,?,?,?,?,?,?)", params![posting.journal.id.clone(),posting.journal.reference.clone(),format!("{:?}",posting.journal.event_type),posting.journal.description.clone(),posting.journal.posted_at.clone(),format!("{:?}",posting.journal.status),posting.journal.reversal_of.clone()]).await.map_err(|e| e.to_string())?;
+    for line in &posting.journal.lines {
+        tx.execute("INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)", params![posting.journal.id.clone(),line.account.clone(),line.debit,line.credit]).await.map_err(|e| e.to_string())?;
+    }
 
     tx.execute("INSERT INTO sales(reference,sale_date,subtotal,revenue,cogs,profit,payment_method,status) VALUES(?,?,?,?,?,?,?,?)", params![reference.clone(),now.clone(),posting.total_revenue,posting.total_revenue,posting.total_cogs,posting.total_revenue-posting.total_cogs,payment_method,"POSTED"]).await.map_err(|e| e.to_string())?;
     let sale_id = tx.last_insert_rowid();
