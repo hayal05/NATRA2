@@ -7,6 +7,8 @@ use turso::{params, Connection};
 use keyring::Entry;
 use uuid::Uuid;
 
+mod accounting;
+
 enum DbBackend {
     Local(turso::Database),
     Synced(turso::sync::Database),
@@ -314,14 +316,16 @@ async fn init_schema(c: &Connection) -> Result<(), String> {
 
     "#).await.map_err(|e| e.to_string())?;
 
-    // Additive migration marker. Future releases must add a new version and apply
-    // each migration transactionally before the UI is made available.
     c.execute(
         "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
         params!["1.1.0", Utc::now().to_rfc3339()]
     ).await.map_err(|e| e.to_string())?;
 
-    // Production databases start empty. Sample/demo data must never be inserted automatically.
+    // Activate the accounting schema only after the operational schema exists.
+    // This keeps startup ordering deterministic and allows the accounting triggers
+    // to reference the already-created operational tables safely.
+    accounting::init_schema(c).await?;
+
     Ok(())
 }
 
@@ -504,7 +508,6 @@ async fn record_purchase(state: State<'_, AppDb>, input: PurchaseInput) -> Resul
     drop(rows);
     let new_stock=old_stock+input.qty;
     let total=input.qty*input.unit_cost;
-    // Weighted-average costing prevents a receipt from abruptly replacing the existing cost basis.
     let new_cost=if new_stock>0.0 { ((old_stock*old_cost)+(input.qty*input.unit_cost))/new_stock } else { input.unit_cost };
     let now=Utc::now().to_rfc3339();
     let reference=format!("PUR-{}", Uuid::new_v4().simple());
@@ -692,7 +695,7 @@ async fn record_return(state: State<'_, AppDb>, input: ReturnInput) -> Result<St
     let returned_cogs=input.qty*unit_cost;
     let returned_profit=refund-returned_cogs;
     tx.execute("UPDATE sales SET revenue=revenue-?1,cogs=cogs-?2,profit=profit-?3 WHERE id=?4",
-        params![refund,returned_cogs,returned_profit,sale_id]).await.map_err(|e|e.to_string())?;
+        params![refund,returned_cogs,returned_profit,sale_id]).await.map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)", params![reference.clone(),"REFUND","Customer return refund",refund,input.account.trim(),now]).await.map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
