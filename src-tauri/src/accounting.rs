@@ -76,14 +76,14 @@ pub async fn init_schema(c: &Connection) -> Result<(), String> {
         WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
 
         INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
-        VALUES(NEW.reference,'Operating expense',NEW.created_at,'POSTED',NEW.created_at);
+        VALUES(NEW.reference || '-EXPENSE','Operating expense',NEW.created_at,'POSTED',NEW.created_at);
 
         INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
-        SELECT id,'6000',NEW.amount,0,NEW.created_at FROM journal_entries WHERE reference=NEW.reference;
+        SELECT id,'6000',NEW.amount,0,NEW.created_at FROM journal_entries WHERE reference=NEW.reference || '-EXPENSE';
 
         INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
         SELECT id,CASE NEW.account WHEN 'Cash' THEN '1000' WHEN 'Bank' THEN '1010' WHEN 'Mobile Money' THEN '1020' END,0,NEW.amount,NEW.created_at
-        FROM journal_entries WHERE reference=NEW.reference;
+        FROM journal_entries WHERE reference=NEW.reference || '-EXPENSE';
       END;
 
       DROP TRIGGER IF EXISTS trg_refund_cash_to_journal;
@@ -113,6 +113,97 @@ pub async fn init_schema(c: &Connection) -> Result<(), String> {
         FROM journal_entries WHERE reference=NEW.reference;
 
         UPDATE journal_lines SET debit=0,credit=debit WHERE journal_entry_id=(SELECT id FROM journal_entries WHERE reference=NEW.reference) AND account_code='5000';
+      END;
+
+      DROP TRIGGER IF EXISTS trg_sale_to_journal;
+      CREATE TRIGGER trg_sale_to_journal
+      AFTER INSERT ON sales
+      BEGIN
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference || '-SALE','Sale recognition',NEW.sale_date,'POSTED',NEW.sale_date);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'1100',NEW.revenue,0,NEW.sale_date FROM journal_entries WHERE reference=NEW.reference || '-SALE';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'4000',0,NEW.revenue,NEW.sale_date FROM journal_entries WHERE reference=NEW.reference || '-SALE';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'5000',NEW.cogs,0,NEW.sale_date FROM journal_entries WHERE reference=NEW.reference || '-SALE' AND NEW.cogs > 0;
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'1200',0,NEW.cogs,NEW.sale_date FROM journal_entries WHERE reference=NEW.reference || '-SALE' AND NEW.cogs > 0;
+      END;
+
+      DROP TRIGGER IF EXISTS trg_sale_cash_to_journal;
+      CREATE TRIGGER trg_sale_cash_to_journal
+      AFTER INSERT ON cash_transactions
+      WHEN NEW.tx_type = 'SALE'
+      BEGIN
+        SELECT RAISE(ABORT, 'Unsupported sale cash account')
+        WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
+
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference || '-CASH','Sale settlement',NEW.created_at,'POSTED',NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,CASE NEW.account WHEN 'Cash' THEN '1000' WHEN 'Bank' THEN '1010' WHEN 'Mobile Money' THEN '1020' END,NEW.amount,0,NEW.created_at
+        FROM journal_entries WHERE reference=NEW.reference || '-CASH';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'1100',0,NEW.amount,NEW.created_at FROM journal_entries WHERE reference=NEW.reference || '-CASH';
+      END;
+
+      DROP TRIGGER IF EXISTS trg_purchase_to_journal;
+      CREATE TRIGGER trg_purchase_to_journal
+      AFTER INSERT ON purchases
+      BEGIN
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference || '-PURCHASE','Inventory purchase',NEW.purchase_date,'POSTED',NEW.purchase_date);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'1200',NEW.total,0,NEW.purchase_date FROM journal_entries WHERE reference=NEW.reference || '-PURCHASE';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'2000',0,NEW.total,NEW.purchase_date FROM journal_entries WHERE reference=NEW.reference || '-PURCHASE';
+      END;
+
+      DROP TRIGGER IF EXISTS trg_purchase_cash_to_journal;
+      CREATE TRIGGER trg_purchase_cash_to_journal
+      AFTER INSERT ON cash_transactions
+      WHEN NEW.tx_type = 'PURCHASE'
+      BEGIN
+        SELECT RAISE(ABORT, 'Unsupported purchase cash account')
+        WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
+
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference || '-CASH','Purchase settlement',NEW.created_at,'POSTED',NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'2000',NEW.amount,0,NEW.created_at FROM journal_entries WHERE reference=NEW.reference || '-CASH';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,CASE NEW.account WHEN 'Cash' THEN '1000' WHEN 'Bank' THEN '1010' WHEN 'Mobile Money' THEN '1020' END,0,NEW.amount,NEW.created_at
+        FROM journal_entries WHERE reference=NEW.reference || '-CASH';
+      END;
+
+      DROP TRIGGER IF EXISTS trg_payment_to_journal;
+      CREATE TRIGGER trg_payment_to_journal
+      AFTER INSERT ON cash_transactions
+      WHEN NEW.tx_type = 'PAYMENT'
+      BEGIN
+        SELECT RAISE(ABORT, 'Unsupported customer payment account')
+        WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
+
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference || '-PAYMENT','Customer receivable payment',NEW.created_at,'POSTED',NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,CASE NEW.account WHEN 'Cash' THEN '1000' WHEN 'Bank' THEN '1010' WHEN 'Mobile Money' THEN '1020' END,NEW.amount,0,NEW.created_at
+        FROM journal_entries WHERE reference=NEW.reference || '-PAYMENT';
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        SELECT id,'1100',0,NEW.amount,NEW.created_at FROM journal_entries WHERE reference=NEW.reference || '-PAYMENT';
       END;
     "#).await.map_err(|e| e.to_string())?;
 
