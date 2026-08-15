@@ -1,5 +1,6 @@
 use chrono::Utc;
-use turso::{params, Connection, Transaction};
+use turso::{params, Connection};
+use turso::transaction::Transaction;
 
 /// Core double-entry accounting schema and posting primitives.
 /// Existing business tables remain the operational source for now; subsequent
@@ -110,10 +111,9 @@ pub async fn post(
     Ok(())
 }
 
-/// Transaction-scoped posting primitive for future atomic business operations.
-/// The caller owns the transaction and commits operational + accounting changes together.
+/// Transaction-scoped posting primitive for atomic business operations.
 pub async fn post_in_transaction(
-    tx: &Transaction,
+    tx: &Transaction<'_>,
     reference: &str,
     entry_date: &str,
     description: &str,
