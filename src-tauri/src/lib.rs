@@ -537,10 +537,6 @@ async fn dashboard_summary(state: State<'_, AppDb>) -> Result<DashboardSummary, 
 }
 
 
-async fn scalar_tx_f64<T: turso::IntoParams>(tx: &turso::transaction::Transaction<'_>, sql: &str, params: T) -> Result<f64,String> {
-    let mut rows=tx.query(sql,params).await.map_err(|e|e.to_string())?;
-    if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<f64>(0).unwrap_or(0.0)) } else { Ok(0.0) }
-}
 
 async fn scalar_f64(c:&Connection, sql:&str)->Result<f64,String>{
     let mut rows=c.query(sql,()).await.map_err(|e|e.to_string())?;
@@ -556,16 +552,13 @@ async fn scalar_i64(c:&Connection, sql:&str)->Result<i64,String>{
 struct SaleInput {
     items: Vec<SaleItem>,
     payment_method: String,
-    customer_id: Option<i64>,
-    paid_amount: Option<f64>,
-    payment_account: Option<String>,
 }
 
 #[tauri::command]
 async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
     if input.items.is_empty() { return Err("Sale has no items".into()); }
     let payment_method = input.payment_method.trim();
-    if !["Cash","Bank","Mobile Money","Credit"].contains(&payment_method) {
+    if !["Cash","Bank","Mobile Money"].contains(&payment_method) {
         return Err("Invalid payment method".into());
     }
     let mut c = conn(&state).await?;
@@ -585,30 +578,6 @@ async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String
         subtotal += item.qty*item.unit_price;
         cogs += item.qty*cost;
     }
-
-    let paid_amount = input.paid_amount.unwrap_or_else(|| if payment_method == "Credit" { 0.0 } else { subtotal });
-    if !paid_amount.is_finite() || paid_amount < 0.0 || paid_amount > subtotal {
-        return Err("Paid amount must be between zero and the sale total".into());
-    }
-    if payment_method == "Credit" && input.customer_id.is_none() {
-        return Err("A customer is required for a credit sale".into());
-    }
-    if payment_method != "Credit" && (paid_amount - subtotal).abs() > 0.005 {
-        return Err("Cash, Bank and Mobile Money sales must be paid in full".into());
-    }
-
-    let customer_id = input.customer_id;
-    if let Some(cid) = customer_id {
-        let mut rows=tx.query("SELECT credit_limit,balance FROM customers WHERE id=?1 AND active=1",params![cid]).await.map_err(|e|e.to_string())?;
-        let row=rows.next().await.map_err(|e|e.to_string())?.ok_or("Customer not found")?;
-        let credit_limit:f64=row.get(0).map_err(|e|e.to_string())?;
-        let balance:f64=row.get(1).map_err(|e|e.to_string())?;
-        let receivable = subtotal - paid_amount;
-        if receivable > 0.0 && balance + receivable > credit_limit + 0.005 {
-            return Err(format!("Credit limit exceeded. Available credit: {:.2}", (credit_limit-balance).max(0.0)));
-        }
-    }
-
     let profit=subtotal-cogs;
     tx.execute("INSERT INTO sales(reference,sale_date,subtotal,revenue,cogs,profit,payment_method) VALUES (?,?,?,?,?,?,?)",
         params![reference.clone(),now.clone(),subtotal,subtotal,cogs,profit,payment_method]).await.map_err(|e|e.to_string())?;
@@ -628,27 +597,8 @@ async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String
         tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_out,balance_after,unit_cost,created_at) VALUES (?,?,?,?,?,?,?)",
             params![reference.clone(),item.sku.clone(),"SALE",item.qty,new_stock,cost,now.clone()]).await.map_err(|e|e.to_string())?;
     }
-
-    if let Some(cid) = customer_id {
-        tx.execute("INSERT INTO sale_customers(sale_id,customer_id) VALUES(?,?)",params![sale_id,cid]).await.map_err(|e|e.to_string())?;
-        let receivable = subtotal - paid_amount;
-        if receivable > 0.005 {
-            tx.execute("UPDATE customers SET balance=balance+?1 WHERE id=?2",params![receivable,cid]).await.map_err(|e|e.to_string())?;
-        }
-    }
-
-    if paid_amount > 0.005 {
-        let account = if payment_method == "Credit" {
-            input.payment_account.as_deref().unwrap_or("Cash").trim()
-        } else {
-            payment_method
-        };
-        if !["Cash","Bank","Mobile Money"].contains(&account) {
-            return Err("Invalid payment account".into());
-        }
-        tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES (?,?,?,?,?,?)",
-            params![reference.clone(),"SALE","POS sale payment",paid_amount,account,now.clone()]).await.map_err(|e|e.to_string())?;
-    }
+    tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES (?,?,?,?,?,?)",
+        params![reference.clone(),"SALE","POS sale",subtotal,payment_method,now]).await.map_err(|e|e.to_string())?;
     tx.commit().await.map_err(|e|e.to_string())?;
     Ok(reference)
 }
@@ -676,18 +626,37 @@ async fn record_return(state: State<'_, AppDb>, input: ReturnInput) -> Result<St
     let unit_price:f64 = row.get(2).map_err(|e| e.to_string())?;
     let unit_cost:f64 = row.get(3).map_err(|e| e.to_string())?;
     drop(rows);
-    let already_returned:f64 = scalar_tx_f64(&tx, "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2", params![input.sale_reference.clone(), input.sku.clone()]).await?;
+    let mut returned_rows = tx
+        .query(
+            "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2",
+            params![input.sale_reference.clone(), input.sku.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let already_returned:f64 = match returned_rows.next().await.map_err(|e| e.to_string())? {
+        Some(row) => row.get::<f64>(0).unwrap_or(0.0),
+        None => 0.0,
+    };
+    drop(returned_rows);
     if input.qty > sold_qty - already_returned { return Err("Return quantity exceeds the remaining returnable quantity".into()); }
-    let mut pr = tx.query("SELECT stock FROM products WHERE sku=?1 AND active=1", params![input.sku.clone()]).await.map_err(|e| e.to_string())?;
+    let mut pr = tx.query("SELECT stock,cost FROM products WHERE sku=?1 AND active=1", params![input.sku.clone()]).await.map_err(|e| e.to_string())?;
     let prow = pr.next().await.map_err(|e| e.to_string())?.ok_or("Product not found")?;
     let stock:f64 = prow.get(0).map_err(|e| e.to_string())?;
+    let current_cost:f64 = prow.get(1).map_err(|e| e.to_string())?;
     drop(pr);
     let new_stock=stock+input.qty;
+    // Preserve the returned goods at their original historical cost and recompute
+    // the perpetual weighted-average inventory cost after the return.
+    let new_cost = if new_stock > 0.0 {
+        ((stock * current_cost) + (input.qty * unit_cost)) / new_stock
+    } else {
+        unit_cost
+    };
     let refund=input.qty*unit_price;
     let reference=format!("RET-{}", Uuid::new_v4().simple());
     let now=Utc::now().to_rfc3339();
     tx.execute("INSERT INTO returns(reference,sale_reference,sku,qty,refund,reason,return_date) VALUES(?,?,?,?,?,?,?)", params![reference.clone(),input.sale_reference,input.sku.clone(),input.qty,refund,input.reason.trim(),now.clone()]).await.map_err(|e| e.to_string())?;
-    tx.execute("UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3", params![new_stock,now.clone(),input.sku.clone()]).await.map_err(|e| e.to_string())?;
+    tx.execute("UPDATE products SET stock=?1,cost=?2,updated_at=?3 WHERE sku=?4", params![new_stock,new_cost,now.clone(),input.sku.clone()]).await.map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_in,balance_after,unit_cost,created_at) VALUES(?,?,?,?,?,?,?)", params![reference.clone(),input.sku.clone(), "RETURN", input.qty,new_stock,unit_cost,now.clone()]).await.map_err(|e| e.to_string())?;
     let returned_cogs=input.qty*unit_cost;
     let returned_profit=refund-returned_cogs;
