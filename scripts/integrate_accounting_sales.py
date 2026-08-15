@@ -57,11 +57,11 @@ if "accounting::post_in_transaction(" not in block:
     ).await?;
 
 '''
-    pattern = r"(?m)^\s*tx\.commit\(\)\.await\.map_err\(\|e\| e\.to_string\(\)\)\?;\s*$\n\s*Ok\(reference\)\s*$"
+    pattern = r"(?m)^\s*tx\.commit\(\)\.await\.map_err\(\|e\| e\.to_string\(\)\)\?;\s*$\n\s*Ok\(reference\)\s*"
     match = re.search(pattern, block)
     if not match:
         raise SystemExit("record_sale commit/return tail not found")
-    replacement = journal_code + "    tx.commit().await.map_err(|e| e.to_string())?;\n    Ok(reference)"
+    replacement = journal_code + "    tx.commit().await.map_err(|e| e.to_string())?;\n    Ok(reference)\n"
     block = block[:match.start()] + replacement + block[match.end():]
     text = text[:start] + block + text[end:]
 
