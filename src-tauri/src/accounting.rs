@@ -70,6 +70,29 @@ pub async fn init_schema(c: &Connection) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     }
 
+    // Existing expense transactions already write to cash_transactions inside the
+    // same Turso transaction as the expense record. This trigger makes that existing
+    // operation automatically create its matching double-entry journal without
+    // changing the UI or duplicating the cash-flow record.
+    c.execute_batch(r#"
+      CREATE TRIGGER IF NOT EXISTS trg_expense_cash_to_journal
+      AFTER INSERT ON cash_transactions
+      WHEN NEW.tx_type = 'EXPENSE'
+      BEGIN
+        SELECT RAISE(ABORT, 'Unsupported expense cash account')
+        WHERE NEW.account NOT IN ('Cash','Bank','Mobile Money');
+
+        INSERT INTO journal_entries(reference,description,entry_date,status,created_at)
+        VALUES(NEW.reference,'Operating expense',NEW.created_at,'POSTED',NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        VALUES(last_insert_rowid(),'6000',NEW.amount,0,NEW.created_at);
+
+        INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,created_at)
+        VALUES(last_insert_rowid(),'1000',0,NEW.amount,NEW.created_at);
+      END;
+    "#).await.map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
