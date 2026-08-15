@@ -24,7 +24,7 @@ pub struct InventoryState {
 
 impl InventoryState {
     pub fn issue(&self, line: &SaleLine) -> Result<(Self, f64), String> {
-        let revenue = line.total()?;
+        line.total()?;
         if !self.qty.is_finite() || self.qty < 0.0 { return Err("Inventory quantity is invalid".into()); }
         if !self.unit_cost.is_finite() || self.unit_cost < 0.0 { return Err("Inventory unit cost is invalid".into()); }
         if line.qty > self.qty + 0.000001 { return Err(format!("Insufficient inventory for SKU {}", line.sku)); }
@@ -42,13 +42,11 @@ pub struct SalePosting {
 }
 
 /// Builds the complete accounting consequence of a sale.
-/// Cash sale: DR Cash / CR Sales Revenue; DR COGS / CR Inventory.
-/// Credit sale uses Accounts Receivable instead of Cash.
+/// Pass Cash as `debit_account` for a cash sale, or Accounts Receivable for a credit sale.
 pub fn post_sale(
     reference: impl Into<String>,
     posted_at: impl Into<String>,
     lines: &[SaleLine],
-    credit_sale: bool,
     debit_account: impl Into<String>,
     revenue_account: impl Into<String>,
     inventory_account: impl Into<String>,
@@ -72,11 +70,6 @@ pub fn post_sale(
         inventory_after.push((line.sku.clone(), updated));
     }
 
-    let debit_account = debit_account.into();
-    let revenue_account = revenue_account.into();
-    let inventory_account = inventory_account.into();
-    let cogs_account = cogs_account.into();
-
     let journal = JournalEntry::post(
         reference,
         EventType::Sale,
@@ -90,6 +83,5 @@ pub fn post_sale(
         ],
     )?;
 
-    let _ = credit_sale;
     Ok(SalePosting { journal, total_revenue, total_cogs, inventory_after })
 }
