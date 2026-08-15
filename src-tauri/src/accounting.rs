@@ -1,5 +1,5 @@
 use chrono::Utc;
-use turso::{Connection, IntoParams};
+use turso::Connection;
 
 /// A single journal line. Exactly one of debit/credit must be positive.
 #[derive(Debug, Clone)]
@@ -86,7 +86,7 @@ pub fn cash_account_code(account: &str) -> Result<&'static str, String> {
 /// Post one balanced, immutable journal entry inside the caller's transaction.
 /// The transaction is deliberately not committed here: operational and accounting
 /// records must commit or roll back together.
-pub async fn post_journal<T: IntoParams>(
+pub async fn post_journal(
     tx: &turso::transaction::Transaction<'_>,
     reference: &str,
     description: &str,
