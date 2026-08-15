@@ -22,7 +22,7 @@ jobs:
 
       - name: Format Rust
         working-directory: src-tauri
-        run: cargo fmt --all -- --check
+        run: cargo fmt --all
 
       - name: Check Rust build
         working-directory: src-tauri
@@ -32,7 +32,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src-tauri/src/lib.rs
+          git add src-tauri/src/lib.rs src-tauri/src/accounting.rs
           git rm .github/workflows/_accounting_sales_integrate.yml scripts/integrate_accounting_sales.py
           git commit -m "feat: post sales to double-entry ledger"
           git push origin HEAD:accounting/core-double-entry
