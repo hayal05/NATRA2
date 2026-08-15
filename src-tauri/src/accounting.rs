@@ -1,6 +1,6 @@
 use chrono::Utc;
-use turso::{params, Connection};
 use turso::transaction::Transaction;
+use turso::{params, Connection};
 
 /// Core double-entry accounting schema and posting primitives.
 /// Existing business tables remain the operational source for now; subsequent
@@ -54,19 +54,19 @@ pub async fn ensure_schema(c: &Connection) -> Result<(), String> {
       END;
 
       INSERT OR IGNORE INTO chart_of_accounts(code,name,account_type,normal_balance,created_at) VALUES
-        ('1000','Cash','ASSET','DEBIT',?1),
-        ('1010','Bank','ASSET','DEBIT',?1),
-        ('1020','Mobile Money','ASSET','DEBIT',?1),
-        ('1100','Accounts Receivable','ASSET','DEBIT',?1),
-        ('1200','Inventory','ASSET','DEBIT',?1),
-        ('2000','Accounts Payable','LIABILITY','CREDIT',?1),
-        ('3000','Owner Equity','EQUITY','CREDIT',?1),
-        ('4000','Sales Revenue','REVENUE','CREDIT',?1),
-        ('4010','Sales Returns','REVENUE','DEBIT',?1),
-        ('5000','Cost of Goods Sold','EXPENSE','DEBIT',?1),
-        ('6000','Operating Expenses','EXPENSE','DEBIT',?1),
-        ('6100','Inventory Adjustment Gain/Loss','EXPENSE','DEBIT',?1),
-        ('6200','Tax Expense','EXPENSE','DEBIT',?1);
+        ('1000','Cash','ASSET','DEBIT',datetime('now')),
+        ('1010','Bank','ASSET','DEBIT',datetime('now')),
+        ('1020','Mobile Money','ASSET','DEBIT',datetime('now')),
+        ('1100','Accounts Receivable','ASSET','DEBIT',datetime('now')),
+        ('1200','Inventory','ASSET','DEBIT',datetime('now')),
+        ('2000','Accounts Payable','LIABILITY','CREDIT',datetime('now')),
+        ('3000','Owner Equity','EQUITY','CREDIT',datetime('now')),
+        ('4000','Sales Revenue','REVENUE','CREDIT',datetime('now')),
+        ('4010','Sales Returns','REVENUE','DEBIT',datetime('now')),
+        ('5000','Cost of Goods Sold','EXPENSE','DEBIT',datetime('now')),
+        ('6000','Operating Expenses','EXPENSE','DEBIT',datetime('now')),
+        ('6100','Inventory Adjustment Gain/Loss','EXPENSE','DEBIT',datetime('now')),
+        ('6200','Tax Expense','EXPENSE','DEBIT',datetime('now'));
     "#).await.map_err(|e| e.to_string())?;
     Ok(())
 }
