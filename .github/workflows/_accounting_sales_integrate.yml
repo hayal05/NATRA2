@@ -3,7 +3,7 @@ name: Accounting Sales Integration
 on:
   push:
     branches:
-      - accounting/core-double-entry
+      - 'accounting/core-double-entry'
 
 permissions:
   contents: write
@@ -18,8 +18,9 @@ jobs:
           fetch-depth: 0
 
       - name: Patch sales accounting integration
-        shell: python
+        shell: bash
         run: |
+          python3 <<'PY'
           from pathlib import Path
 
           path = Path("src-tauri/src/lib.rs")
@@ -29,61 +30,25 @@ jobs:
               text = "mod accounting;\n" + text
 
           schema_needle = "            init_schema(&c).await?;\n"
-          schema_replacement = schema_needle + "            accounting::ensure_schema(&c).await?;\n"
           if "accounting::ensure_schema(&c).await?;" not in text:
               if schema_needle not in text:
                   raise SystemExit("init_schema insertion point not found")
-              text = text.replace(schema_needle, schema_replacement, 1)
+              text = text.replace(schema_needle, schema_needle + "            accounting::ensure_schema(&c).await?;\n", 1)
 
           start = text.index("async fn record_sale")
           end = text.index("\n#[derive(Debug, Deserialize)]\nstruct ReturnInput", start)
           block = text[start:end]
 
           commit_needle = "    tx.commit().await.map_err(|e| e.to_string())?;\n    Ok(reference)\n"
-          journal_code = r'''    let receivable = subtotal - paid_amount;
-    let mut journal_lines: Vec<(&str, f64, f64, &str)> = Vec::with_capacity(5);
-    if paid_amount > 0.005 {
-        let cash_account = if payment_method == "Credit" {
-            input.payment_account.as_deref().unwrap_or("Cash").trim()
-        } else {
-            payment_method
-        };
-        let account_code = match cash_account {
-            "Cash" => "1000",
-            "Bank" => "1010",
-            "Mobile Money" => "1020",
-            _ => return Err("Invalid payment account".into()),
-        };
-        journal_lines.push((account_code, paid_amount, 0.0, "Sale proceeds received"));
-    }
-    if receivable > 0.005 {
-        journal_lines.push(("1100", receivable, 0.0, "Customer receivable"));
-    }
-    journal_lines.push(("4000", 0.0, subtotal, "Sales revenue"));
-    if cogs > 0.005 {
-        journal_lines.push(("5000", cogs, 0.0, "Cost of goods sold"));
-        journal_lines.push(("1200", 0.0, cogs, "Inventory carrying amount released"));
-    }
-    accounting::post_in_transaction(
-        &tx,
-        &reference,
-        &now,
-        "Sale accounting entry",
-        "SALE",
-        Some(&reference),
-        &journal_lines,
-    ).await?;
-
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(reference)
-'''
           if "accounting::post_in_transaction(" not in block:
               if commit_needle not in block:
                   raise SystemExit("record_sale commit insertion point not found")
+              journal_code = '''    let receivable = subtotal - paid_amount;\n    let mut journal_lines: Vec<(&str, f64, f64, &str)> = Vec::with_capacity(5);\n    if paid_amount > 0.005 {\n        let cash_account = if payment_method == "Credit" {\n            input.payment_account.as_deref().unwrap_or("Cash").trim()\n        } else {\n            payment_method\n        };\n        let account_code = match cash_account {\n            "Cash" => "1000",\n            "Bank" => "1010",\n            "Mobile Money" => "1020",\n            _ => return Err("Invalid payment account".into()),\n        };\n        journal_lines.push((account_code, paid_amount, 0.0, "Sale proceeds received"));\n    }\n    if receivable > 0.005 {\n        journal_lines.push(("1100", receivable, 0.0, "Customer receivable"));\n    }\n    journal_lines.push(("4000", 0.0, subtotal, "Sales revenue"));\n    if cogs > 0.005 {\n        journal_lines.push(("5000", cogs, 0.0, "Cost of goods sold"));\n        journal_lines.push(("1200", 0.0, cogs, "Inventory carrying amount released"));\n    }\n    accounting::post_in_transaction(\n        &tx,\n        &reference,\n        &now,\n        "Sale accounting entry",\n        "SALE",\n        Some(&reference),\n        &journal_lines,\n    ).await?;\n\n    tx.commit().await.map_err(|e| e.to_string())?;\n    Ok(reference)\n'''
               block = block.replace(commit_needle, journal_code, 1)
               text = text[:start] + block + text[end:]
 
           path.write_text(text, encoding="utf-8")
+          PY
 
       - name: Format Rust
         working-directory: src-tauri
