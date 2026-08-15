@@ -26,7 +26,7 @@ jobs:
 
       - name: Check Rust build
         working-directory: src-tauri
-        run: cargo check --locked
+        run: cargo check
 
       - name: Commit integration and remove temporary files
         run: |
