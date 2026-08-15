@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integrate:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout branch
         uses: actions/checkout@v4
@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
 
       - name: Apply sales accounting integration
-        run: python3 scripts/integrate_accounting_sales.py
+        run: python scripts/integrate_accounting_sales.py
 
       - name: Format Rust
         working-directory: src-tauri
@@ -29,6 +29,7 @@ jobs:
         run: cargo check
 
       - name: Commit integration and remove temporary files
+        shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
