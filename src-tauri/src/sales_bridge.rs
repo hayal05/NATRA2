@@ -1,7 +1,8 @@
 use chrono::Utc;
 use crate::{accounting_core::JournalEntry, sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
+use std::collections::HashSet;
 use tauri::State;
-use turso::{params, Connection};
+use turso::params;
 use uuid::Uuid;
 
 fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str, String> {
@@ -13,8 +14,68 @@ fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str
     }
 }
 
-async fn ensure_journal_schema(c: &Connection) -> Result<(), String> {
-    c.execute_batch(r#"
+async fn persist_journal<T>(tx: &T, entry: &JournalEntry) -> Result<(), String>
+where
+    T: JournalStore,
+{
+    tx.execute(
+        "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?,?,?,?,?,?,?)",
+        params![entry.id.clone(),entry.reference.clone(),format!("{:?}", entry.event_type),entry.description.clone(),entry.posted_at.clone(),format!("{:?}", entry.status),entry.reversal_of.clone()],
+    ).await?;
+    for line in &entry.lines {
+        tx.execute(
+            "INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)",
+            params![entry.id.clone(), line.account.clone(), line.debit, line.credit],
+        ).await?;
+    }
+    Ok(())
+}
+
+trait JournalStore {
+    fn execute<'a>(&'a self, sql: &'a str, params: turso::Params) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+impl JournalStore for turso::Transaction<'_> {
+    fn execute<'a>(&'a self, sql: &'a str, params: turso::Params) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move { turso::Transaction::execute(self, sql, params).await.map(|_| ()).map_err(|e| e.to_string()) })
+    }
+}
+
+/// Real application sales command. The UI contract remains `record_sale`.
+/// All financial consequences are produced by Sales Core and persisted as a
+/// balanced double-entry journal before the transaction is committed.
+#[tauri::command]
+pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
+    if input.items.is_empty() { return Err("Sale has no items".into()); }
+    let payment_method = input.payment_method.trim();
+    let debit_account = debit_account_for_payment_method(payment_method)?;
+
+    let mut seen = HashSet::new();
+    for item in &input.items {
+        let sku = item.sku.trim();
+        if sku.is_empty() { return Err("SKU is required".into()); }
+        if !seen.insert(sku.to_string()) { return Err(format!("Duplicate SKU in sale: {}", sku)); }
+    }
+
+    let mut c = super::conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let reference = format!("SAL-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
+    let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine { sku: item.sku.trim().to_string(), qty: item.qty, unit_price: item.unit_price }).collect();
+
+    let mut opening_inventory = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let mut rows = tx.query("SELECT stock,cost FROM products WHERE sku=?1 AND active=1", params![line.sku.clone()]).await.map_err(|e| e.to_string())?;
+        let row = rows.next().await.map_err(|e| e.to_string())?.ok_or_else(|| format!("Product not found: {}", line.sku))?;
+        let qty: f64 = row.get(0).map_err(|e| e.to_string())?;
+        let unit_cost: f64 = row.get(1).map_err(|e| e.to_string())?;
+        drop(rows);
+        opening_inventory.push((line.sku.clone(), InventoryState { qty, unit_cost }));
+    }
+
+    let posting = post_sale(reference.clone(), now.clone(), &lines, debit_account, "4000-SALES", "1200-INVENTORY", "5000-COGS", &opening_inventory)?;
+
+    tx.execute_batch(r#"
       CREATE TABLE IF NOT EXISTS journal_entries (
         id TEXT PRIMARY KEY,
         reference TEXT NOT NULL UNIQUE,
@@ -34,49 +95,7 @@ async fn ensure_journal_schema(c: &Connection) -> Result<(), String> {
       CREATE INDEX IF NOT EXISTS idx_journal_entries_reference ON journal_entries(reference);
       CREATE INDEX IF NOT EXISTS idx_journal_lines_journal ON journal_lines(journal_id);
       CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account);
-    "#).await.map_err(|e| e.to_string())
-}
-
-async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(), String> {
-    c.execute(
-        "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?,?,?,?,?,?,?)",
-        params![entry.id.clone(),entry.reference.clone(),format!("{:?}", entry.event_type),entry.description.clone(),entry.posted_at.clone(),format!("{:?}", entry.status),entry.reversal_of.clone()],
-    ).await.map_err(|e| e.to_string())?;
-    for line in &entry.lines {
-        c.execute(
-            "INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)",
-            params![entry.id.clone(), line.account.clone(), line.debit, line.credit],
-        ).await.map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// Real application sales command. The UI contract remains `record_sale`.
-/// All financial consequences are produced by Sales Core and persisted as a
-/// balanced double-entry journal before the transaction is committed.
-#[tauri::command]
-pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
-    if input.items.is_empty() { return Err("Sale has no items".into()); }
-    let payment_method = input.payment_method.trim();
-    let debit_account = debit_account_for_payment_method(payment_method)?;
-    let mut c = super::conn(&state).await?;
-    let tx = c.transaction().await.map_err(|e| e.to_string())?;
-    let reference = format!("SAL-{}", Uuid::new_v4().simple());
-    let now = Utc::now().to_rfc3339();
-    let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine { sku: item.sku.clone(), qty: item.qty, unit_price: item.unit_price }).collect();
-
-    let mut opening_inventory = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let mut rows = tx.query("SELECT stock,cost FROM products WHERE sku=?1 AND active=1", params![line.sku.clone()]).await.map_err(|e| e.to_string())?;
-        let row = rows.next().await.map_err(|e| e.to_string())?.ok_or_else(|| format!("Product not found: {}", line.sku))?;
-        let qty: f64 = row.get(0).map_err(|e| e.to_string())?;
-        let unit_cost: f64 = row.get(1).map_err(|e| e.to_string())?;
-        drop(rows);
-        opening_inventory.push((line.sku.clone(), InventoryState { qty, unit_cost }));
-    }
-
-    let posting = post_sale(reference.clone(), now.clone(), &lines, debit_account, "4000-SALES", "1200-INVENTORY", "5000-COGS", &opening_inventory)?;
-    ensure_journal_schema(&tx).await?;
+    "#).await.map_err(|e| e.to_string())?;
     persist_journal(&tx, &posting.journal).await?;
 
     tx.execute("INSERT INTO sales(reference,sale_date,subtotal,revenue,cogs,profit,payment_method,status) VALUES(?,?,?,?,?,?,?,?)", params![reference.clone(),now.clone(),posting.total_revenue,posting.total_revenue,posting.total_cogs,posting.total_revenue-posting.total_cogs,payment_method,"POSTED"]).await.map_err(|e| e.to_string())?;
