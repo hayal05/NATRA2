@@ -55,44 +55,40 @@ function decorateCart() {
     if (!sku) return;
     const product = window.__natraLiveProducts?.find((p) => String(p.sku) === String(sku));
     const first = row.firstElementChild;
-    const strong = row.querySelector("strong");
     const qtyText = first?.querySelector("small")?.textContent || "1 × ETB 0";
     const match = qtyText.match(/^\s*([0-9.]+)\s*[×x]\s*/i);
     const qty = Number(match?.[1] || 1);
-    const price = Number(product?.price ?? String(qtyText).replace(/^.*?×\s*ETB\s*/i, "") || 0) / 1;
+    const fallbackPrice = Number(String(qtyText).replace(/^.*?[×x]\s*ETB\s*/i, "")) || 0;
+    const price = Number(product?.price ?? fallbackPrice);
     const name = first?.querySelector("b")?.textContent || product?.name || sku;
     row.classList.add("natra-cart-live-row");
     row.innerHTML = `
       <div><b>${name}</b><small>${sku}</small></div>
       <div class="natra-cart-price">${money(price)}</div>
-      <input class="natra-qty" type="number" min="1" step="1" value="${qty}" data-live-qty="${sku}" aria-label="Quantity for ${name}">
+      <input class="natra-qty" type="number" min="1" step="1" value="${qty}" data-live-qty="${sku}" data-live-current-qty="${qty}" aria-label="Quantity for ${name}">
       <div class="natra-cart-amount" data-live-amount="${sku}">${money(qty * price)}</div>
       <button class="row-btn danger" data-remove-cart="${sku}" title="Remove">×</button>`;
-    strong?.remove();
   });
   decorating = false;
 }
 
-async function setCartQuantity(sku, wanted) {
+async function setCartQuantity(sku, current, wanted) {
+  current = Math.max(1, Math.floor(Number(current) || 1));
   wanted = Math.max(1, Math.floor(Number(wanted) || 1));
+  if (current === wanted) return;
   const row = document.querySelector(`[data-live-qty="${CSS.escape(sku)}"]`)?.closest(".cart-row");
-  if (!row) return;
-  const qty = Math.max(1, Math.floor(Number(row.querySelector(".natra-qty")?.value) || 1));
-  if (qty === wanted) return;
-  const remove = row.querySelector("[data-remove-cart]");
+  const remove = row?.querySelector("[data-remove-cart]");
   if (!remove) return;
   remove.click();
   await new Promise((r) => setTimeout(r, 0));
-  const tile = productTile(sku);
-  if (!tile) {
-    const search = document.querySelector("#posSearch");
-    if (search) {
-      search.value = sku;
-      search.dispatchEvent(new Event("input", { bubbles: true }));
-      await new Promise((r) => setTimeout(r, 0));
-    }
+  const search = document.querySelector("#posSearch");
+  let target = productTile(sku);
+  if (!target && search) {
+    search.value = sku;
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+    target = productTile(sku);
   }
-  const target = productTile(sku);
   if (!target) return;
   for (let i = 0; i < wanted; i++) target.click();
 }
@@ -110,11 +106,14 @@ function liveInputHandler(e) {
 document.addEventListener("change", async (e) => {
   const qty = e.target.closest?.("[data-live-qty]");
   if (!qty) return;
-  await setCartQuantity(qty.dataset.liveQty, qty.value);
+  const current = Number(qty.dataset.liveCurrentQty || 1);
+  const wanted = Number(qty.value || 1);
+  qty.dataset.liveCurrentQty = String(Math.max(1, Math.floor(wanted)));
+  await setCartQuantity(qty.dataset.liveQty, current, wanted);
+  setTimeout(decorateCart, 0);
 });
 
 document.addEventListener("input", liveInputHandler);
-
 document.addEventListener("click", (e) => {
   const tile = e.target.closest?.("[data-add-cart]");
   if (tile) setTimeout(decorateCart, 0);
@@ -126,10 +125,7 @@ const cartObserver = new MutationObserver(() => decorateCart());
 
 async function refreshIfChanged() {
   try {
-    const [products, transactions] = await Promise.all([
-      invoke("list_products"),
-      invoke("list_transactions")
-    ]);
+    const [products, transactions] = await Promise.all([invoke("list_products"), invoke("list_transactions")]);
     window.__natraLiveProducts = products || [];
     const signature = JSON.stringify({
       products: (products || []).map(p => [p.sku, p.stock, p.price, p.cost, p.min_stock]),
