@@ -30,6 +30,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Static quality checks
+        run: npm run qa
+
+      - name: Frontend production build
+        run: npm run build
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

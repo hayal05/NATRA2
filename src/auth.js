@@ -110,4 +110,4 @@ function updateUserMenu(user) { const menu=document.querySelector(".user-menu");
 
 async function authenticate() { ensureStyle(); const screen=document.createElement("div"); screen.id="natra-auth-screen"; document.body.appendChild(screen); const users=getUsers(); if(!users.length)renderCreate();else renderLogin(); await new Promise(resolve=>{const timer=setInterval(()=>{if(!document.getElementById("natra-auth-screen")){clearInterval(timer);resolve();}},50);}); }
 
-await authenticate();
+authenticate();
