@@ -71,46 +71,6 @@ pub async fn ensure_schema(c: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn post(
-    c: &Connection,
-    reference: &str,
-    entry_date: &str,
-    description: &str,
-    source_type: &str,
-    source_reference: Option<&str>,
-    lines: &[(&str, f64, f64, &str)],
-) -> Result<(), String> {
-    if lines.is_empty() { return Err("Journal entry must contain lines".into()); }
-    let mut debit_total = 0.0;
-    let mut credit_total = 0.0;
-    for (_, debit, credit, _) in lines {
-        if *debit < 0.0 || *credit < 0.0 || ((*debit > 0.0) == (*credit > 0.0)) {
-            return Err("Each journal line must contain either debit or credit".into());
-        }
-        debit_total += *debit;
-        credit_total += *credit;
-    }
-    if (debit_total - credit_total).abs() > 0.005 {
-        return Err(format!("Unbalanced journal entry: debit {:.2}, credit {:.2}", debit_total, credit_total));
-    }
-
-    let tx = c.transaction().await.map_err(|e| e.to_string())?;
-    let now = Utc::now().to_rfc3339();
-    tx.execute(
-        "INSERT INTO journal_entries(reference,entry_date,description,source_type,source_reference,status,created_at) VALUES(?,?,?,?,?,'POSTED',?)",
-        params![reference, entry_date, description, source_type, source_reference.unwrap_or(""), now.clone()],
-    ).await.map_err(|e| e.to_string())?;
-    let entry_id = tx.last_insert_rowid();
-    for (account, debit, credit, memo) in lines {
-        tx.execute(
-            "INSERT INTO journal_lines(journal_entry_id,account_code,debit,credit,memo) VALUES(?,?,?,?,?)",
-            params![entry_id, account, *debit, *credit, *memo],
-        ).await.map_err(|e| e.to_string())?;
-    }
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Transaction-scoped posting primitive for atomic business operations.
 pub async fn post_in_transaction(
     tx: &Transaction<'_>,
