@@ -81,7 +81,9 @@ pub async fn post_in_transaction(
     source_reference: Option<&str>,
     lines: &[(&str, f64, f64, &str)],
 ) -> Result<(), String> {
-    if lines.is_empty() { return Err("Journal entry must contain lines".into()); }
+    if lines.is_empty() {
+        return Err("Journal entry must contain lines".into());
+    }
     let mut debit_total = 0.0;
     let mut credit_total = 0.0;
     for (_, debit, credit, _) in lines {
@@ -92,7 +94,10 @@ pub async fn post_in_transaction(
         credit_total += *credit;
     }
     if (debit_total - credit_total).abs() > 0.005 {
-        return Err(format!("Unbalanced journal entry: debit {:.2}, credit {:.2}", debit_total, credit_total));
+        return Err(format!(
+            "Unbalanced journal entry: debit {:.2}, credit {:.2}",
+            debit_total, credit_total
+        ));
     }
     let now = Utc::now().to_rfc3339();
     tx.execute(

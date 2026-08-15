@@ -1,10 +1,11 @@
+mod accounting;
 use chrono::Utc;
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::{env, path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::Mutex;
 use turso::{params, Connection};
-use keyring::Entry;
 use uuid::Uuid;
 
 enum DbBackend {
@@ -48,7 +49,6 @@ struct DashboardSummary {
     top_products: Vec<TopProduct>,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct CreditSale {
     items: Vec<SaleItem>,
@@ -74,7 +74,9 @@ struct SaleItem {
 }
 
 #[derive(Debug, Deserialize)]
-struct CategoryInput { name: String }
+struct CategoryInput {
+    name: String,
+}
 
 #[derive(Debug, Deserialize)]
 struct StockAdjustmentInput {
@@ -117,15 +119,20 @@ fn keyring_value(name: &str) -> Option<String> {
 }
 
 fn cloud_credentials() -> (Option<String>, Option<String>) {
-    let url = env::var("TURSO_DATABASE_URL").ok().filter(|v| !v.trim().is_empty())
+    let url = env::var("TURSO_DATABASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
         .or_else(|| keyring_value("database-url"));
-    let token = env::var("TURSO_AUTH_TOKEN").ok().filter(|v| !v.trim().is_empty())
+    let token = env::var("TURSO_AUTH_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
         .or_else(|| keyring_value("auth-token"));
     (url, token)
 }
 
 async fn init_schema(c: &Connection) -> Result<(), String> {
-    c.execute_batch(r#"
+    c.execute_batch(
+        r#"
       PRAGMA foreign_keys = ON;
 
       CREATE TABLE IF NOT EXISTS categories (
@@ -312,19 +319,23 @@ async fn init_schema(c: &Connection) -> Result<(), String> {
         updated_at TEXT NOT NULL
       );
 
-    "#).await.map_err(|e| e.to_string())?;
+    "#,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Additive migration marker. Future releases must add a new version and apply
     // each migration transactionally before the UI is made available.
     c.execute(
         "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES(?1,?2)",
-        params!["1.1.0", Utc::now().to_rfc3339()]
-    ).await.map_err(|e| e.to_string())?;
+        params!["1.1.0", Utc::now().to_rfc3339()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     // Production databases start empty. Sample/demo data must never be inserted automatically.
     Ok(())
 }
-
 
 #[derive(Debug, Deserialize)]
 struct ProductInput {
@@ -356,83 +367,145 @@ struct PurchaseInput {
 
 #[tauri::command]
 async fn list_categories(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
-    let c=conn(&state).await?;
-    let mut rows=c.query("SELECT id,name FROM categories ORDER BY name",()).await.map_err(|e|e.to_string())?;
-    let mut out=Vec::new();
-    while let Some(r)=rows.next().await.map_err(|e|e.to_string())? {
+    let c = conn(&state).await?;
+    let mut rows = c
+        .query("SELECT id,name FROM categories ORDER BY name", ())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
         out.push(serde_json::json!({"id":r.get::<i64>(0).unwrap_or(0),"name":r.get::<String>(1).unwrap_or_default()}));
     }
     Ok(serde_json::Value::Array(out))
 }
 
 #[tauri::command]
-async fn create_category(state: State<'_, AppDb>, input: CategoryInput) -> Result<i64,String> {
-    let name=input.name.trim();
-    if name.is_empty(){return Err("Category name is required".into());}
-    let c=conn(&state).await?;
-    c.execute("INSERT INTO categories(name,created_at) VALUES(?,?)",params![name,Utc::now().to_rfc3339()]).await.map_err(|e|e.to_string())?;
+async fn create_category(state: State<'_, AppDb>, input: CategoryInput) -> Result<i64, String> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("Category name is required".into());
+    }
+    let c = conn(&state).await?;
+    c.execute(
+        "INSERT INTO categories(name,created_at) VALUES(?,?)",
+        params![name, Utc::now().to_rfc3339()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(c.last_insert_rowid())
 }
 
 #[tauri::command]
-async fn record_stock_adjustment(state: State<'_, AppDb>, input: StockAdjustmentInput) -> Result<String,String> {
-    if input.qty<=0.0 {return Err("Adjustment quantity must be greater than zero".into());}
-    let direction=input.adjustment_type.trim();
-    if direction!="Increase" && direction!="Decrease" {return Err("Adjustment type must be Increase or Decrease".into());}
-    let mut c=conn(&state).await?;
-    let tx=c.transaction().await.map_err(|e|e.to_string())?;
-    let mut rows=tx.query("SELECT stock,cost FROM products WHERE sku=?1 AND active=1",params![input.sku.trim()]).await.map_err(|e|e.to_string())?;
-    let row=rows.next().await.map_err(|e|e.to_string())?.ok_or("Product not found")?;
-    let stock:f64=row.get(0).map_err(|e|e.to_string())?;
-    let cost:f64=row.get(1).map_err(|e|e.to_string())?;
+async fn record_stock_adjustment(
+    state: State<'_, AppDb>,
+    input: StockAdjustmentInput,
+) -> Result<String, String> {
+    if input.qty <= 0.0 {
+        return Err("Adjustment quantity must be greater than zero".into());
+    }
+    let direction = input.adjustment_type.trim();
+    if direction != "Increase" && direction != "Decrease" {
+        return Err("Adjustment type must be Increase or Decrease".into());
+    }
+    let mut c = conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let mut rows = tx
+        .query(
+            "SELECT stock,cost FROM products WHERE sku=?1 AND active=1",
+            params![input.sku.trim()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Product not found")?;
+    let stock: f64 = row.get(0).map_err(|e| e.to_string())?;
+    let cost: f64 = row.get(1).map_err(|e| e.to_string())?;
     drop(rows);
-    let new_stock=if direction=="Increase"{stock+input.qty}else{stock-input.qty};
-    if new_stock<0.0{return Err("Adjustment would make stock negative".into());}
-    let reference=format!("ADJ-{}",Uuid::new_v4().simple());
-    let now=Utc::now().to_rfc3339();
-    tx.execute("UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3",params![new_stock,now.clone(),input.sku.trim()]).await.map_err(|e|e.to_string())?;
+    let new_stock = if direction == "Increase" {
+        stock + input.qty
+    } else {
+        stock - input.qty
+    };
+    if new_stock < 0.0 {
+        return Err("Adjustment would make stock negative".into());
+    }
+    let reference = format!("ADJ-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3",
+        params![new_stock, now.clone(), input.sku.trim()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_in,qty_out,balance_after,unit_cost,created_at) VALUES(?,?,?,?,?,?,?,?)",params![reference.clone(),input.sku.trim(),format!("ADJUSTMENT: {}",direction),if direction=="Increase"{input.qty}else{0.0},if direction=="Decrease"{input.qty}else{0.0},new_stock,cost,now.clone()]).await.map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO audit_log(actor,action,entity_type,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",params!["local-user","STOCK_ADJUSTMENT","PRODUCT",input.sku.trim(),format!("{}; {}; {}",direction,input.reason.trim(),input.notes.trim()),now]).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
 #[tauri::command]
-async fn record_income(state: State<'_, AppDb>, input: IncomeInput) -> Result<String,String> {
-    if input.amount<=0.0 || input.description.trim().is_empty(){return Err("Income amount and description are required".into());}
-    let c=conn(&state).await?; let reference=format!("INC-{}",Uuid::new_v4().simple()); let now=Utc::now().to_rfc3339();
+async fn record_income(state: State<'_, AppDb>, input: IncomeInput) -> Result<String, String> {
+    if input.amount <= 0.0 || input.description.trim().is_empty() {
+        return Err("Income amount and description are required".into());
+    }
+    let c = conn(&state).await?;
+    let reference = format!("INC-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
     c.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![reference.clone(),"INCOME",format!("{}: {}",input.category.trim(),input.description.trim()),input.amount,input.account.trim(),now]).await.map_err(|e|e.to_string())?;
     Ok(reference)
 }
 
 #[tauri::command]
-async fn record_transfer(state: State<'_, AppDb>, input: TransferInput) -> Result<String,String> {
-    if input.amount<=0.0{return Err("Transfer amount must be greater than zero".into());}
-    if input.from_account.trim()==input.to_account.trim(){return Err("From and To accounts must be different".into());}
-    let mut c=conn(&state).await?; let tx=c.transaction().await.map_err(|e|e.to_string())?; let reference=format!("TRF-{}",Uuid::new_v4().simple()); let now=Utc::now().to_rfc3339();
+async fn record_transfer(state: State<'_, AppDb>, input: TransferInput) -> Result<String, String> {
+    if input.amount <= 0.0 {
+        return Err("Transfer amount must be greater than zero".into());
+    }
+    if input.from_account.trim() == input.to_account.trim() {
+        return Err("From and To accounts must be different".into());
+    }
+    let mut c = conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let reference = format!("TRF-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![format!("{}-OUT",reference),"TRANSFER_OUT",format!("To {}: {}",input.to_account.trim(),input.note.trim()),input.amount,input.from_account.trim(),now.clone()]).await.map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![format!("{}-IN",reference),"TRANSFER_IN",format!("From {}: {}",input.from_account.trim(),input.note.trim()),input.amount,input.to_account.trim(),now.clone()]).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?; Ok(reference)
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(reference)
 }
 
 #[tauri::command]
-async fn list_stock_movements(state: State<'_, AppDb>) -> Result<serde_json::Value,String> {
-    let c=conn(&state).await?; let mut rows=c.query("SELECT reference,sku,movement_type,qty_in,qty_out,balance_after,unit_cost,created_at FROM stock_movements ORDER BY created_at DESC LIMIT 500",()).await.map_err(|e|e.to_string())?; let mut out=Vec::new();
-    while let Some(r)=rows.next().await.map_err(|e|e.to_string())? {out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"sku":r.get::<String>(1).unwrap_or_default(),"movement_type":r.get::<String>(2).unwrap_or_default(),"qty_in":r.get::<f64>(3).unwrap_or(0.0),"qty_out":r.get::<f64>(4).unwrap_or(0.0),"balance_after":r.get::<f64>(5).unwrap_or(0.0),"unit_cost":r.get::<f64>(6).unwrap_or(0.0),"created_at":r.get::<String>(7).unwrap_or_default()}));}
+async fn list_stock_movements(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
+    let c = conn(&state).await?;
+    let mut rows=c.query("SELECT reference,sku,movement_type,qty_in,qty_out,balance_after,unit_cost,created_at FROM stock_movements ORDER BY created_at DESC LIMIT 500",()).await.map_err(|e|e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"sku":r.get::<String>(1).unwrap_or_default(),"movement_type":r.get::<String>(2).unwrap_or_default(),"qty_in":r.get::<f64>(3).unwrap_or(0.0),"qty_out":r.get::<f64>(4).unwrap_or(0.0),"balance_after":r.get::<f64>(5).unwrap_or(0.0),"unit_cost":r.get::<f64>(6).unwrap_or(0.0),"created_at":r.get::<String>(7).unwrap_or_default()}));
+    }
     Ok(serde_json::Value::Array(out))
 }
 
 #[tauri::command]
-async fn list_sales_history(state: State<'_, AppDb>) -> Result<serde_json::Value,String> {
-    let c=conn(&state).await?; let mut rows=c.query("SELECT reference,sale_date,revenue,cogs,profit,payment_method,status FROM sales ORDER BY sale_date DESC LIMIT 500",()).await.map_err(|e|e.to_string())?; let mut out=Vec::new();
-    while let Some(r)=rows.next().await.map_err(|e|e.to_string())? {out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"date":r.get::<String>(1).unwrap_or_default(),"revenue":r.get::<f64>(2).unwrap_or(0.0),"cogs":r.get::<f64>(3).unwrap_or(0.0),"profit":r.get::<f64>(4).unwrap_or(0.0),"payment_method":r.get::<String>(5).unwrap_or_default(),"status":r.get::<String>(6).unwrap_or_default()}));}
+async fn list_sales_history(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
+    let c = conn(&state).await?;
+    let mut rows=c.query("SELECT reference,sale_date,revenue,cogs,profit,payment_method,status FROM sales ORDER BY sale_date DESC LIMIT 500",()).await.map_err(|e|e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"date":r.get::<String>(1).unwrap_or_default(),"revenue":r.get::<f64>(2).unwrap_or(0.0),"cogs":r.get::<f64>(3).unwrap_or(0.0),"profit":r.get::<f64>(4).unwrap_or(0.0),"payment_method":r.get::<String>(5).unwrap_or_default(),"status":r.get::<String>(6).unwrap_or_default()}));
+    }
     Ok(serde_json::Value::Array(out))
 }
 
 #[tauri::command]
-async fn list_purchase_history(state: State<'_, AppDb>) -> Result<serde_json::Value,String> {
-    let c=conn(&state).await?; let mut rows=c.query("SELECT reference,supplier,purchase_date,total,status FROM purchases ORDER BY purchase_date DESC LIMIT 500",()).await.map_err(|e|e.to_string())?; let mut out=Vec::new();
-    while let Some(r)=rows.next().await.map_err(|e|e.to_string())? {out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"supplier":r.get::<String>(1).unwrap_or_default(),"date":r.get::<String>(2).unwrap_or_default(),"total":r.get::<f64>(3).unwrap_or(0.0),"status":r.get::<String>(4).unwrap_or_default()}));}
+async fn list_purchase_history(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
+    let c = conn(&state).await?;
+    let mut rows=c.query("SELECT reference,supplier,purchase_date,total,status FROM purchases ORDER BY purchase_date DESC LIMIT 500",()).await.map_err(|e|e.to_string())?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        out.push(serde_json::json!({"reference":r.get::<String>(0).unwrap_or_default(),"supplier":r.get::<String>(1).unwrap_or_default(),"date":r.get::<String>(2).unwrap_or_default(),"total":r.get::<f64>(3).unwrap_or(0.0),"status":r.get::<String>(4).unwrap_or_default()}));
+    }
     Ok(serde_json::Value::Array(out))
 }
 
@@ -457,10 +530,14 @@ async fn list_products(state: State<'_, AppDb>) -> Result<Vec<Product>, String> 
 
 #[tauri::command]
 async fn save_product(state: State<'_, AppDb>, input: ProductInput) -> Result<(), String> {
-    if input.sku.trim().is_empty() || input.name.trim().is_empty() { return Err("SKU and product name are required".into()); }
-    if input.cost < 0.0 || input.price < 0.0 || input.stock < 0.0 || input.min_stock < 0.0 { return Err("Cost, price, stock and minimum stock cannot be negative".into()); }
-    let c=conn(&state).await?;
-    let now=Utc::now().to_rfc3339();
+    if input.sku.trim().is_empty() || input.name.trim().is_empty() {
+        return Err("SKU and product name are required".into());
+    }
+    if input.cost < 0.0 || input.price < 0.0 || input.stock < 0.0 || input.min_stock < 0.0 {
+        return Err("Cost, price, stock and minimum stock cannot be negative".into());
+    }
+    let c = conn(&state).await?;
+    let now = Utc::now().to_rfc3339();
     c.execute("INSERT INTO products(sku,name,category,cost,price,stock,min_stock,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(sku) DO UPDATE SET name=excluded.name,category=excluded.category,cost=excluded.cost,price=excluded.price,stock=excluded.stock,min_stock=excluded.min_stock,updated_at=excluded.updated_at",
       params![input.sku,input.name,input.category,input.cost,input.price,input.stock,input.min_stock,now.clone(),now]).await.map_err(|e|e.to_string())?;
     Ok(())
@@ -468,25 +545,32 @@ async fn save_product(state: State<'_, AppDb>, input: ProductInput) -> Result<()
 
 #[tauri::command]
 async fn delete_product(state: State<'_, AppDb>, sku: String) -> Result<(), String> {
-    let c=conn(&state).await?;
-    c.execute("UPDATE products SET active=0,updated_at=?1 WHERE sku=?2",params![Utc::now().to_rfc3339(),sku]).await.map_err(|e|e.to_string())?;
+    let c = conn(&state).await?;
+    c.execute(
+        "UPDATE products SET active=0,updated_at=?1 WHERE sku=?2",
+        params![Utc::now().to_rfc3339(), sku],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn record_expense(state: State<'_, AppDb>, input: ExpenseInput) -> Result<String, String> {
     if input.amount <= 0.0 || input.description.trim().is_empty() {
-        return Err("Expense amount must be greater than zero and a description is required".into());
+        return Err(
+            "Expense amount must be greater than zero and a description is required".into(),
+        );
     }
-    let mut c=conn(&state).await?;
-    let tx=c.transaction().await.map_err(|e| e.to_string())?;
-    let now=Utc::now().to_rfc3339();
-    let reference=format!("EXP-{}", Uuid::new_v4().simple());
+    let mut c = conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let now = Utc::now().to_rfc3339();
+    let reference = format!("EXP-{}", Uuid::new_v4().simple());
     tx.execute("INSERT INTO expenses(reference,category,description,amount,expense_date) VALUES(?,?,?,?,?)",
         params![reference.clone(),input.category.trim(),input.description.trim(),input.amount,now.clone()]).await.map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",
         params![reference.clone(),"EXPENSE","Operating expense",input.amount,input.account.trim(),now]).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
@@ -495,61 +579,135 @@ async fn record_purchase(state: State<'_, AppDb>, input: PurchaseInput) -> Resul
     if input.qty <= 0.0 || input.unit_cost < 0.0 || input.supplier.trim().is_empty() {
         return Err("Supplier, quantity and non-negative unit cost are required".into());
     }
-    let mut c=conn(&state).await?;
-    let tx=c.transaction().await.map_err(|e|e.to_string())?;
-    let mut rows=tx.query("SELECT stock,cost FROM products WHERE sku=?1 AND active=1",params![input.sku.clone()]).await.map_err(|e|e.to_string())?;
-    let row=rows.next().await.map_err(|e|e.to_string())?.ok_or_else(||"Product not found".to_string())?;
-    let old_stock:f64=row.get(0).map_err(|e|e.to_string())?;
-    let old_cost:f64=row.get(1).map_err(|e|e.to_string())?;
+    let mut c = conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let mut rows = tx
+        .query(
+            "SELECT stock,cost FROM products WHERE sku=?1 AND active=1",
+            params![input.sku.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Product not found".to_string())?;
+    let old_stock: f64 = row.get(0).map_err(|e| e.to_string())?;
+    let old_cost: f64 = row.get(1).map_err(|e| e.to_string())?;
     drop(rows);
-    let new_stock=old_stock+input.qty;
-    let total=input.qty*input.unit_cost;
+    let new_stock = old_stock + input.qty;
+    let total = input.qty * input.unit_cost;
     // Weighted-average costing prevents a receipt from abruptly replacing the existing cost basis.
-    let new_cost=if new_stock>0.0 { ((old_stock*old_cost)+(input.qty*input.unit_cost))/new_stock } else { input.unit_cost };
-    let now=Utc::now().to_rfc3339();
-    let reference=format!("PUR-{}", Uuid::new_v4().simple());
-    tx.execute("INSERT INTO purchases(reference,supplier,purchase_date,total) VALUES(?,?,?,?)",params![reference.clone(),input.supplier.trim(),now.clone(),total]).await.map_err(|e|e.to_string())?;
-    tx.execute("UPDATE products SET stock=?1,cost=?2,updated_at=?3 WHERE sku=?4",params![new_stock,new_cost,now.clone(),input.sku.clone()]).await.map_err(|e|e.to_string())?;
+    let new_cost = if new_stock > 0.0 {
+        ((old_stock * old_cost) + (input.qty * input.unit_cost)) / new_stock
+    } else {
+        input.unit_cost
+    };
+    let now = Utc::now().to_rfc3339();
+    let reference = format!("PUR-{}", Uuid::new_v4().simple());
+    tx.execute(
+        "INSERT INTO purchases(reference,supplier,purchase_date,total) VALUES(?,?,?,?)",
+        params![reference.clone(), input.supplier.trim(), now.clone(), total],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE products SET stock=?1,cost=?2,updated_at=?3 WHERE sku=?4",
+        params![new_stock, new_cost, now.clone(), input.sku.clone()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_in,balance_after,unit_cost,created_at) VALUES(?,?,?,?,?,?,?)",params![reference.clone(),input.sku.clone(),"PURCHASE",input.qty,new_stock,input.unit_cost,now.clone()]).await.map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![reference.clone(),"PURCHASE","Inventory purchase",total,input.account.trim(),now]).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
 #[tauri::command]
 async fn dashboard_summary(state: State<'_, AppDb>) -> Result<DashboardSummary, String> {
     let c = conn(&state).await?;
-    let stock_value: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(stock*cost),0) FROM products").await?;
-    let today_sales: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(revenue),0) FROM sales WHERE date(sale_date)=date('now','localtime')").await?;
-    let gross_profit: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(profit),0) FROM sales WHERE date(sale_date)=date('now','localtime')").await?;
+    let stock_value: f64 =
+        scalar_f64(&c, "SELECT COALESCE(SUM(stock*cost),0) FROM products").await?;
+    let today_sales: f64 = scalar_f64(
+        &c,
+        "SELECT COALESCE(SUM(revenue),0) FROM sales WHERE date(sale_date)=date('now','localtime')",
+    )
+    .await?;
+    let gross_profit: f64 = scalar_f64(
+        &c,
+        "SELECT COALESCE(SUM(profit),0) FROM sales WHERE date(sale_date)=date('now','localtime')",
+    )
+    .await?;
     let cash_in: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('INCOME','SALE') AND account != 'Credit'").await?;
     let cash_out: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('EXPENSE','PURCHASE','PAYMENT')").await?;
-    let low_stock: i64 = scalar_i64(&c, "SELECT COUNT(*) FROM products WHERE active=1 AND stock<=min_stock").await?;
-    let receivables: f64 = scalar_f64(&c, "SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1").await?;
+    let low_stock: i64 = scalar_i64(
+        &c,
+        "SELECT COUNT(*) FROM products WHERE active=1 AND stock<=min_stock",
+    )
+    .await?;
+    let receivables: f64 = scalar_f64(
+        &c,
+        "SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1",
+    )
+    .await?;
     let mut rows = c.query("SELECT p.name,COALESCE(SUM(si.qty),0),COALESCE(SUM(si.line_revenue),0),COALESCE(SUM(si.line_profit),0) FROM sale_items si JOIN products p ON p.sku=si.sku GROUP BY si.sku ORDER BY SUM(si.line_revenue) DESC LIMIT 5", ()).await.map_err(|e| e.to_string())?;
     let mut top_products = vec![];
     while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
-        let revenue:f64=r.get(2).map_err(|e|e.to_string())?;
-        let profit:f64=r.get(3).map_err(|e|e.to_string())?;
-        top_products.push(TopProduct{name:r.get(0).map_err(|e|e.to_string())?,sold_qty:r.get(1).map_err(|e|e.to_string())?,revenue,profit,margin:if revenue>0.0{profit/revenue*100.0}else{0.0}});
+        let revenue: f64 = r.get(2).map_err(|e| e.to_string())?;
+        let profit: f64 = r.get(3).map_err(|e| e.to_string())?;
+        top_products.push(TopProduct {
+            name: r.get(0).map_err(|e| e.to_string())?,
+            sold_qty: r.get(1).map_err(|e| e.to_string())?,
+            revenue,
+            profit,
+            margin: if revenue > 0.0 {
+                profit / revenue * 100.0
+            } else {
+                0.0
+            },
+        });
     }
-    Ok(DashboardSummary { stock_value, today_sales, gross_profit, cash_balance: cash_in-cash_out, low_stock, receivables, top_products })
+    Ok(DashboardSummary {
+        stock_value,
+        today_sales,
+        gross_profit,
+        cash_balance: cash_in - cash_out,
+        low_stock,
+        receivables,
+        top_products,
+    })
 }
 
-
-async fn scalar_tx_f64<T: turso::IntoParams>(tx: &turso::transaction::Transaction<'_>, sql: &str, params: T) -> Result<f64,String> {
-    let mut rows=tx.query(sql,params).await.map_err(|e|e.to_string())?;
-    if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<f64>(0).unwrap_or(0.0)) } else { Ok(0.0) }
+async fn scalar_tx_f64<T: turso::IntoParams>(
+    tx: &turso::transaction::Transaction<'_>,
+    sql: &str,
+    params: T,
+) -> Result<f64, String> {
+    let mut rows = tx.query(sql, params).await.map_err(|e| e.to_string())?;
+    if let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        Ok(r.get::<f64>(0).unwrap_or(0.0))
+    } else {
+        Ok(0.0)
+    }
 }
 
-async fn scalar_f64(c:&Connection, sql:&str)->Result<f64,String>{
-    let mut rows=c.query(sql,()).await.map_err(|e|e.to_string())?;
-    if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<f64>(0).unwrap_or(0.0)) } else { Ok(0.0) }
+async fn scalar_f64(c: &Connection, sql: &str) -> Result<f64, String> {
+    let mut rows = c.query(sql, ()).await.map_err(|e| e.to_string())?;
+    if let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        Ok(r.get::<f64>(0).unwrap_or(0.0))
+    } else {
+        Ok(0.0)
+    }
 }
 
-async fn scalar_i64(c:&Connection, sql:&str)->Result<i64,String>{
-    let mut rows=c.query(sql,()).await.map_err(|e|e.to_string())?;
-    if let Some(r)=rows.next().await.map_err(|e|e.to_string())? { Ok(r.get::<i64>(0).unwrap_or(0)) } else { Ok(0) }
+async fn scalar_i64(c: &Connection, sql: &str) -> Result<i64, String> {
+    let mut rows = c.query(sql, ()).await.map_err(|e| e.to_string())?;
+    if let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
+        Ok(r.get::<i64>(0).unwrap_or(0))
+    } else {
+        Ok(0)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -563,30 +721,54 @@ struct SaleInput {
 
 #[tauri::command]
 async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
-    if input.items.is_empty() { return Err("Sale has no items".into()); }
+    if input.items.is_empty() {
+        return Err("Sale has no items".into());
+    }
     let payment_method = input.payment_method.trim();
-    if !["Cash","Bank","Mobile Money","Credit"].contains(&payment_method) {
+    if !["Cash", "Bank", "Mobile Money", "Credit"].contains(&payment_method) {
         return Err("Invalid payment method".into());
     }
     let mut c = conn(&state).await?;
     let tx = c.transaction().await.map_err(|e| e.to_string())?;
     let reference = format!("SAL-{}", Uuid::new_v4().simple());
     let now = Utc::now().to_rfc3339();
-    let mut subtotal=0.0;
-    let mut cogs=0.0;
+    let mut subtotal = 0.0;
+    let mut cogs = 0.0;
 
     for item in &input.items {
-        if item.qty <= 0.0 || item.unit_price < 0.0 { return Err("Sale quantities must be greater than zero and prices cannot be negative".into()); }
-        let mut rows=tx.query("SELECT cost,stock FROM products WHERE sku=?1 AND active=1", params![item.sku.clone()]).await.map_err(|e|e.to_string())?;
-        let row=rows.next().await.map_err(|e|e.to_string())?.ok_or_else(||format!("Product not found: {}",item.sku))?;
-        let cost:f64=row.get(0).map_err(|e|e.to_string())?;
-        let stock:f64=row.get(1).map_err(|e|e.to_string())?;
-        if stock < item.qty { return Err(format!("Insufficient stock for {}",item.sku)); }
-        subtotal += item.qty*item.unit_price;
-        cogs += item.qty*cost;
+        if item.qty <= 0.0 || item.unit_price < 0.0 {
+            return Err(
+                "Sale quantities must be greater than zero and prices cannot be negative".into(),
+            );
+        }
+        let mut rows = tx
+            .query(
+                "SELECT cost,stock FROM products WHERE sku=?1 AND active=1",
+                params![item.sku.clone()],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Product not found: {}", item.sku))?;
+        let cost: f64 = row.get(0).map_err(|e| e.to_string())?;
+        let stock: f64 = row.get(1).map_err(|e| e.to_string())?;
+        if stock < item.qty {
+            return Err(format!("Insufficient stock for {}", item.sku));
+        }
+        subtotal += item.qty * item.unit_price;
+        cogs += item.qty * cost;
     }
 
-    let paid_amount = input.paid_amount.unwrap_or_else(|| if payment_method == "Credit" { 0.0 } else { subtotal });
+    let paid_amount = input.paid_amount.unwrap_or_else(|| {
+        if payment_method == "Credit" {
+            0.0
+        } else {
+            subtotal
+        }
+    });
     if !paid_amount.is_finite() || paid_amount < 0.0 || paid_amount > subtotal {
         return Err("Paid amount must be between zero and the sale total".into());
     }
@@ -599,41 +781,81 @@ async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String
 
     let customer_id = input.customer_id;
     if let Some(cid) = customer_id {
-        let mut rows=tx.query("SELECT credit_limit,balance FROM customers WHERE id=?1 AND active=1",params![cid]).await.map_err(|e|e.to_string())?;
-        let row=rows.next().await.map_err(|e|e.to_string())?.ok_or("Customer not found")?;
-        let credit_limit:f64=row.get(0).map_err(|e|e.to_string())?;
-        let balance:f64=row.get(1).map_err(|e|e.to_string())?;
+        let mut rows = tx
+            .query(
+                "SELECT credit_limit,balance FROM customers WHERE id=?1 AND active=1",
+                params![cid],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("Customer not found")?;
+        let credit_limit: f64 = row.get(0).map_err(|e| e.to_string())?;
+        let balance: f64 = row.get(1).map_err(|e| e.to_string())?;
         let receivable = subtotal - paid_amount;
         if receivable > 0.0 && balance + receivable > credit_limit + 0.005 {
-            return Err(format!("Credit limit exceeded. Available credit: {:.2}", (credit_limit-balance).max(0.0)));
+            return Err(format!(
+                "Credit limit exceeded. Available credit: {:.2}",
+                (credit_limit - balance).max(0.0)
+            ));
         }
     }
 
-    let profit=subtotal-cogs;
+    let profit = subtotal - cogs;
     tx.execute("INSERT INTO sales(reference,sale_date,subtotal,revenue,cogs,profit,payment_method) VALUES (?,?,?,?,?,?,?)",
         params![reference.clone(),now.clone(),subtotal,subtotal,cogs,profit,payment_method]).await.map_err(|e|e.to_string())?;
-    let sale_id=tx.last_insert_rowid();
+    let sale_id = tx.last_insert_rowid();
     for item in &input.items {
-        let mut rows=tx.query("SELECT cost,stock FROM products WHERE sku=?1 AND active=1",params![item.sku.clone()]).await.map_err(|e|e.to_string())?;
-        let row=rows.next().await.map_err(|e|e.to_string())?.ok_or_else(||format!("Product not found: {}",item.sku))?;
-        let cost:f64=row.get(0).map_err(|e|e.to_string())?;
-        let stock:f64=row.get(1).map_err(|e|e.to_string())?;
-        if stock < item.qty { return Err(format!("Insufficient stock for {}",item.sku)); }
-        let new_stock=stock-item.qty;
-        let revenue=item.qty*item.unit_price;
-        let line_cogs=item.qty*cost;
+        let mut rows = tx
+            .query(
+                "SELECT cost,stock FROM products WHERE sku=?1 AND active=1",
+                params![item.sku.clone()],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Product not found: {}", item.sku))?;
+        let cost: f64 = row.get(0).map_err(|e| e.to_string())?;
+        let stock: f64 = row.get(1).map_err(|e| e.to_string())?;
+        if stock < item.qty {
+            return Err(format!("Insufficient stock for {}", item.sku));
+        }
+        let new_stock = stock - item.qty;
+        let revenue = item.qty * item.unit_price;
+        let line_cogs = item.qty * cost;
         tx.execute("INSERT INTO sale_items(sale_id,sku,qty,unit_price,unit_cost,line_revenue,line_cogs,line_profit) VALUES (?,?,?,?,?,?,?,?)",
             params![sale_id,item.sku.clone(),item.qty,item.unit_price,cost,revenue,line_cogs,revenue-line_cogs]).await.map_err(|e|e.to_string())?;
-        tx.execute("UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3",params![new_stock,now.clone(),item.sku.clone()]).await.map_err(|e|e.to_string())?;
+        tx.execute(
+            "UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3",
+            params![new_stock, now.clone(), item.sku.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_out,balance_after,unit_cost,created_at) VALUES (?,?,?,?,?,?,?)",
             params![reference.clone(),item.sku.clone(),"SALE",item.qty,new_stock,cost,now.clone()]).await.map_err(|e|e.to_string())?;
     }
 
     if let Some(cid) = customer_id {
-        tx.execute("INSERT INTO sale_customers(sale_id,customer_id) VALUES(?,?)",params![sale_id,cid]).await.map_err(|e|e.to_string())?;
+        tx.execute(
+            "INSERT INTO sale_customers(sale_id,customer_id) VALUES(?,?)",
+            params![sale_id, cid],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
         let receivable = subtotal - paid_amount;
         if receivable > 0.005 {
-            tx.execute("UPDATE customers SET balance=balance+?1 WHERE id=?2",params![receivable,cid]).await.map_err(|e|e.to_string())?;
+            tx.execute(
+                "UPDATE customers SET balance=balance+?1 WHERE id=?2",
+                params![receivable, cid],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         }
     }
 
@@ -643,13 +865,48 @@ async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String
         } else {
             payment_method
         };
-        if !["Cash","Bank","Mobile Money"].contains(&account) {
+        if !["Cash", "Bank", "Mobile Money"].contains(&account) {
             return Err("Invalid payment account".into());
         }
         tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES (?,?,?,?,?,?)",
             params![reference.clone(),"SALE","POS sale payment",paid_amount,account,now.clone()]).await.map_err(|e|e.to_string())?;
     }
-    tx.commit().await.map_err(|e|e.to_string())?;
+    let receivable = subtotal - paid_amount;
+    let mut journal_lines: Vec<(&str, f64, f64, &str)> = Vec::with_capacity(5);
+    if paid_amount > 0.005 {
+        let cash_account = if payment_method == "Credit" {
+            input.payment_account.as_deref().unwrap_or("Cash").trim()
+        } else {
+            payment_method
+        };
+        let account_code = match cash_account {
+            "Cash" => "1000",
+            "Bank" => "1010",
+            "Mobile Money" => "1020",
+            _ => return Err("Invalid payment account".into()),
+        };
+        journal_lines.push((account_code, paid_amount, 0.0, "Sale proceeds received"));
+    }
+    if receivable > 0.005 {
+        journal_lines.push(("1100", receivable, 0.0, "Customer receivable"));
+    }
+    journal_lines.push(("4000", 0.0, subtotal, "Sales revenue"));
+    if cogs > 0.005 {
+        journal_lines.push(("5000", cogs, 0.0, "Cost of goods sold"));
+        journal_lines.push(("1200", 0.0, cogs, "Inventory carrying amount released"));
+    }
+    accounting::post_in_transaction(
+        &tx,
+        &reference,
+        &now,
+        "Sale accounting entry",
+        "SALE",
+        Some(&reference),
+        &journal_lines,
+    )
+    .await?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
@@ -670,29 +927,59 @@ async fn record_return(state: State<'_, AppDb>, input: ReturnInput) -> Result<St
     let mut c = conn(&state).await?;
     let tx = c.transaction().await.map_err(|e| e.to_string())?;
     let mut rows = tx.query("SELECT s.id, si.qty, si.unit_price, si.unit_cost FROM sales s JOIN sale_items si ON si.sale_id=s.id WHERE s.reference=?1 AND si.sku=?2", params![input.sale_reference.clone(), input.sku.clone()]).await.map_err(|e| e.to_string())?;
-    let row = rows.next().await.map_err(|e| e.to_string())?.ok_or("Sale item not found")?;
-    let sale_id:i64 = row.get(0).map_err(|e| e.to_string())?;
-    let sold_qty:f64 = row.get(1).map_err(|e| e.to_string())?;
-    let unit_price:f64 = row.get(2).map_err(|e| e.to_string())?;
-    let unit_cost:f64 = row.get(3).map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Sale item not found")?;
+    let sale_id: i64 = row.get(0).map_err(|e| e.to_string())?;
+    let sold_qty: f64 = row.get(1).map_err(|e| e.to_string())?;
+    let unit_price: f64 = row.get(2).map_err(|e| e.to_string())?;
+    let unit_cost: f64 = row.get(3).map_err(|e| e.to_string())?;
     drop(rows);
-    let already_returned:f64 = scalar_tx_f64(&tx, "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2", params![input.sale_reference.clone(), input.sku.clone()]).await?;
-    if input.qty > sold_qty - already_returned { return Err("Return quantity exceeds the remaining returnable quantity".into()); }
-    let mut pr = tx.query("SELECT stock FROM products WHERE sku=?1 AND active=1", params![input.sku.clone()]).await.map_err(|e| e.to_string())?;
-    let prow = pr.next().await.map_err(|e| e.to_string())?.ok_or("Product not found")?;
-    let stock:f64 = prow.get(0).map_err(|e| e.to_string())?;
+    let already_returned: f64 = scalar_tx_f64(
+        &tx,
+        "SELECT COALESCE(SUM(qty),0) FROM returns WHERE sale_reference=?1 AND sku=?2",
+        params![input.sale_reference.clone(), input.sku.clone()],
+    )
+    .await?;
+    if input.qty > sold_qty - already_returned {
+        return Err("Return quantity exceeds the remaining returnable quantity".into());
+    }
+    let mut pr = tx
+        .query(
+            "SELECT stock FROM products WHERE sku=?1 AND active=1",
+            params![input.sku.clone()],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let prow = pr
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Product not found")?;
+    let stock: f64 = prow.get(0).map_err(|e| e.to_string())?;
     drop(pr);
-    let new_stock=stock+input.qty;
-    let refund=input.qty*unit_price;
-    let reference=format!("RET-{}", Uuid::new_v4().simple());
-    let now=Utc::now().to_rfc3339();
+    let new_stock = stock + input.qty;
+    let refund = input.qty * unit_price;
+    let reference = format!("RET-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
     tx.execute("INSERT INTO returns(reference,sale_reference,sku,qty,refund,reason,return_date) VALUES(?,?,?,?,?,?,?)", params![reference.clone(),input.sale_reference,input.sku.clone(),input.qty,refund,input.reason.trim(),now.clone()]).await.map_err(|e| e.to_string())?;
-    tx.execute("UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3", params![new_stock,now.clone(),input.sku.clone()]).await.map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE products SET stock=?1,updated_at=?2 WHERE sku=?3",
+        params![new_stock, now.clone(), input.sku.clone()],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO stock_movements(reference,sku,movement_type,qty_in,balance_after,unit_cost,created_at) VALUES(?,?,?,?,?,?,?)", params![reference.clone(),input.sku.clone(), "RETURN", input.qty,new_stock,unit_cost,now.clone()]).await.map_err(|e| e.to_string())?;
-    let returned_cogs=input.qty*unit_cost;
-    let returned_profit=refund-returned_cogs;
-    tx.execute("UPDATE sales SET revenue=revenue-?1,cogs=cogs-?2,profit=profit-?3 WHERE id=?4",
-        params![refund,returned_cogs,returned_profit,sale_id]).await.map_err(|e|e.to_string())?;
+    let returned_cogs = input.qty * unit_cost;
+    let returned_profit = refund - returned_cogs;
+    tx.execute(
+        "UPDATE sales SET revenue=revenue-?1,cogs=cogs-?2,profit=profit-?3 WHERE id=?4",
+        params![refund, returned_cogs, returned_profit, sale_id],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)", params![reference.clone(),"REFUND","Customer return refund",refund,input.account.trim(),now]).await.map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
@@ -706,21 +993,43 @@ struct PaymentInput {
 }
 
 #[tauri::command]
-async fn record_customer_payment(state: State<'_, AppDb>, input: PaymentInput) -> Result<String, String> {
-    if input.amount <= 0.0 || input.customer_id <= 0 { return Err("Valid customer and payment amount are required".into()); }
-    let mut c=conn(&state).await?;
-    let tx=c.transaction().await.map_err(|e|e.to_string())?;
-    let mut rows=tx.query("SELECT balance FROM customers WHERE id=?1 AND active=1",params![input.customer_id]).await.map_err(|e|e.to_string())?;
-    let row=rows.next().await.map_err(|e|e.to_string())?.ok_or("Customer not found")?;
-    let balance:f64=row.get(0).map_err(|e|e.to_string())?;
+async fn record_customer_payment(
+    state: State<'_, AppDb>,
+    input: PaymentInput,
+) -> Result<String, String> {
+    if input.amount <= 0.0 || input.customer_id <= 0 {
+        return Err("Valid customer and payment amount are required".into());
+    }
+    let mut c = conn(&state).await?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let mut rows = tx
+        .query(
+            "SELECT balance FROM customers WHERE id=?1 AND active=1",
+            params![input.customer_id],
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Customer not found")?;
+    let balance: f64 = row.get(0).map_err(|e| e.to_string())?;
     drop(rows);
-    if input.amount > balance { return Err("Payment cannot exceed the customer's outstanding balance".into()); }
-    let reference=format!("PAY-{}",Uuid::new_v4().simple());
-    let now=Utc::now().to_rfc3339();
-    tx.execute("UPDATE customers SET balance=balance-?1 WHERE id=?2",params![input.amount,input.customer_id]).await.map_err(|e|e.to_string())?;
+    if input.amount > balance {
+        return Err("Payment cannot exceed the customer's outstanding balance".into());
+    }
+    let reference = format!("PAY-{}", Uuid::new_v4().simple());
+    let now = Utc::now().to_rfc3339();
+    tx.execute(
+        "UPDATE customers SET balance=balance-?1 WHERE id=?2",
+        params![input.amount, input.customer_id],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO customer_payments(reference,customer_id,amount,account,payment_date) VALUES(?,?,?,?,?)",params![reference.clone(),input.customer_id,input.amount,input.account.trim(),now.clone()]).await.map_err(|e|e.to_string())?;
     tx.execute("INSERT INTO cash_transactions(reference,tx_type,description,amount,account,created_at) VALUES(?,?,?,?,?,?)",params![reference.clone(),"PAYMENT","Customer receivable payment",input.amount,input.account.trim(),now]).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(reference)
 }
 
@@ -738,19 +1047,44 @@ struct ReportSummary {
 }
 
 #[tauri::command]
-async fn report_summary(state: State<'_, AppDb>) -> Result<ReportSummary,String> {
-    let c=conn(&state).await?;
-    let revenue=scalar_f64(&c,"SELECT COALESCE(SUM(revenue),0) FROM sales").await?;
-    let cogs=scalar_f64(&c,"SELECT COALESCE(SUM(cogs),0) FROM sales").await?;
-    let profit=scalar_f64(&c,"SELECT COALESCE(SUM(profit),0) FROM sales").await?;
-    let inventory_value=scalar_f64(&c,"SELECT COALESCE(SUM(stock*cost),0) FROM products WHERE active=1").await?;
-    let low_stock=scalar_i64(&c,"SELECT COUNT(*) FROM products WHERE active=1 AND stock<=min_stock").await?;
-    let receivables=scalar_f64(&c,"SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1").await?;
+async fn report_summary(state: State<'_, AppDb>) -> Result<ReportSummary, String> {
+    let c = conn(&state).await?;
+    let revenue = scalar_f64(&c, "SELECT COALESCE(SUM(revenue),0) FROM sales").await?;
+    let cogs = scalar_f64(&c, "SELECT COALESCE(SUM(cogs),0) FROM sales").await?;
+    let profit = scalar_f64(&c, "SELECT COALESCE(SUM(profit),0) FROM sales").await?;
+    let inventory_value = scalar_f64(
+        &c,
+        "SELECT COALESCE(SUM(stock*cost),0) FROM products WHERE active=1",
+    )
+    .await?;
+    let low_stock = scalar_i64(
+        &c,
+        "SELECT COUNT(*) FROM products WHERE active=1 AND stock<=min_stock",
+    )
+    .await?;
+    let receivables = scalar_f64(
+        &c,
+        "SELECT COALESCE(SUM(balance),0) FROM customers WHERE active=1",
+    )
+    .await?;
     let cash_in=scalar_f64(&c,"SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('SALE','INCOME','PAYMENT') AND account != 'Credit'").await?;
     let cash_out=scalar_f64(&c,"SELECT COALESCE(SUM(amount),0) FROM cash_transactions WHERE tx_type IN ('EXPENSE','PURCHASE','REFUND')").await?;
-    Ok(ReportSummary{revenue,cogs,profit,margin:if revenue>0.0{profit/revenue*100.0}else{0.0},inventory_value,low_stock,receivables,cash_in,cash_out})
+    Ok(ReportSummary {
+        revenue,
+        cogs,
+        profit,
+        margin: if revenue > 0.0 {
+            profit / revenue * 100.0
+        } else {
+            0.0
+        },
+        inventory_value,
+        low_stock,
+        receivables,
+        cash_in,
+        cash_out,
+    })
 }
-
 
 #[derive(Debug, Serialize)]
 struct LedgerRow {
@@ -804,37 +1138,62 @@ async fn list_customers(state: State<'_, AppDb>) -> Result<Vec<Customer>, String
     let mut rows = c.query("SELECT id,name,COALESCE(phone,''),COALESCE(email,''),credit_limit,balance FROM customers WHERE active=1 ORDER BY name", ()).await.map_err(|e| e.to_string())?;
     let mut out = vec![];
     while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
-        out.push(Customer { id:r.get(0).map_err(|e|e.to_string())?, name:r.get(1).map_err(|e|e.to_string())?, phone:r.get(2).map_err(|e|e.to_string())?, email:r.get(3).map_err(|e|e.to_string())?, credit_limit:r.get(4).map_err(|e|e.to_string())?, balance:r.get(5).map_err(|e|e.to_string())? });
+        out.push(Customer {
+            id: r.get(0).map_err(|e| e.to_string())?,
+            name: r.get(1).map_err(|e| e.to_string())?,
+            phone: r.get(2).map_err(|e| e.to_string())?,
+            email: r.get(3).map_err(|e| e.to_string())?,
+            credit_limit: r.get(4).map_err(|e| e.to_string())?,
+            balance: r.get(5).map_err(|e| e.to_string())?,
+        });
     }
     Ok(out)
 }
 
 #[tauri::command]
 async fn save_customer(state: State<'_, AppDb>, input: CustomerInput) -> Result<(), String> {
-    if input.name.trim().is_empty() { return Err("Customer name is required".into()); }
-    let c=conn(&state).await?;
-    c.execute("INSERT INTO customers(name,phone,email,credit_limit,created_at) VALUES(?,?,?,?,?)", params![input.name.trim(),input.phone.trim(),input.email.trim(),input.credit_limit,Utc::now().to_rfc3339()]).await.map_err(|e|e.to_string())?;
+    if input.name.trim().is_empty() {
+        return Err("Customer name is required".into());
+    }
+    let c = conn(&state).await?;
+    c.execute(
+        "INSERT INTO customers(name,phone,email,credit_limit,created_at) VALUES(?,?,?,?,?)",
+        params![
+            input.name.trim(),
+            input.phone.trim(),
+            input.email.trim(),
+            input.credit_limit,
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn sync_now(state: State<'_, AppDb>) -> Result<(), String> {
-    let db=state.db.lock().await;
+    let db = state.db.lock().await;
     match &*db {
         DbBackend::Synced(db) => {
-            db.push().await.map_err(|e|e.to_string())?;
-            db.pull().await.map_err(|e|e.to_string())?;
+            db.push().await.map_err(|e| e.to_string())?;
+            db.pull().await.map_err(|e| e.to_string())?;
             Ok(())
         }
         DbBackend::Local(_) => Err("Cloud sync is not configured. Local mode is active.".into()),
     }
 }
 
-
 #[tauri::command]
 async fn list_suppliers(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
     let c = conn(&state).await?;
-    let mut rows = c.query("SELECT id,name,phone,email,address FROM suppliers WHERE active=1 ORDER BY name", ()).await.map_err(|e| e.to_string())?;
+    let mut rows = c
+        .query(
+            "SELECT id,name,phone,email,address FROM suppliers WHERE active=1 ORDER BY name",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     while let Some(r) = rows.next().await.map_err(|e| e.to_string())? {
         out.push(serde_json::json!({
@@ -860,7 +1219,9 @@ async fn create_supplier(state: State<'_, AppDb>, input: SupplierInput) -> Resul
 #[tauri::command]
 async fn backup_database(state: State<'_, AppDb>, destination: String) -> Result<String, String> {
     let destination = destination.trim();
-    if destination.is_empty() { return Err("Backup destination is required".into()); }
+    if destination.is_empty() {
+        return Err("Backup destination is required".into());
+    }
     let c = conn(&state).await?;
     let mut sql = String::from("-- NATRA Management logical backup\n-- Generated by the application; validate before restore.\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n");
 
@@ -870,65 +1231,98 @@ async fn backup_database(state: State<'_, AppDb>, destination: String) -> Result
     ).await.map_err(|e| e.to_string())?;
 
     while let Some(r) = tables.next().await.map_err(|e| e.to_string())? {
-        let name:String=r.get(0).map_err(|e|e.to_string())?;
-        let ddl:String=r.get(1).map_err(|e|e.to_string())?;
-        if ddl.trim().is_empty() { continue; }
+        let name: String = r.get(0).map_err(|e| e.to_string())?;
+        let ddl: String = r.get(1).map_err(|e| e.to_string())?;
+        if ddl.trim().is_empty() {
+            continue;
+        }
         sql.push_str(&ddl);
         sql.push_str(";\n");
 
-        let safe_name=name.replace('"',"\"\"");
-        let mut data=c.query(&format!("SELECT * FROM \"{}\"",safe_name),()).await.map_err(|e|e.to_string())?;
-        let columns=data.column_names();
-        while let Some(row)=data.next().await.map_err(|e|e.to_string())? {
-            let mut values=Vec::with_capacity(row.column_count());
+        let safe_name = name.replace('"', "\"\"");
+        let mut data = c
+            .query(&format!("SELECT * FROM \"{}\"", safe_name), ())
+            .await
+            .map_err(|e| e.to_string())?;
+        let columns = data.column_names();
+        while let Some(row) = data.next().await.map_err(|e| e.to_string())? {
+            let mut values = Vec::with_capacity(row.column_count());
             for i in 0..row.column_count() {
-                let value=row.get_value(i).map_err(|e|e.to_string())?;
-                let rendered=match value {
+                let value = row.get_value(i).map_err(|e| e.to_string())?;
+                let rendered = match value {
                     turso::Value::Null => "NULL".to_string(),
                     turso::Value::Integer(v) => v.to_string(),
                     turso::Value::Real(v) => v.to_string(),
-                    turso::Value::Text(v) => format!("'{}'",v.replace('\'',"''")),
-                    turso::Value::Blob(v) => format!("X'{}'",v.iter().map(|b|format!("{b:02X}")).collect::<String>()),
+                    turso::Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+                    turso::Value::Blob(v) => format!(
+                        "X'{}'",
+                        v.iter().map(|b| format!("{b:02X}")).collect::<String>()
+                    ),
                 };
                 values.push(rendered);
             }
             sql.push_str(&format!(
                 "INSERT INTO \"{}\" ({}) VALUES ({});\n",
                 safe_name,
-                columns.iter().map(|c|format!("\"{}\"",c.replace('"',"\"\""))).collect::<Vec<_>>().join(","),
+                columns
+                    .iter()
+                    .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                    .collect::<Vec<_>>()
+                    .join(","),
                 values.join(",")
             ));
         }
     }
     sql.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
-    tokio::fs::write(destination, sql).await.map_err(|e| e.to_string())?;
+    tokio::fs::write(destination, sql)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(destination.to_string())
 }
 
 #[tauri::command]
 async fn restore_database(state: State<'_, AppDb>, source: String) -> Result<(), String> {
-    let source=source.trim();
-    if source.is_empty() { return Err("Restore source is required".into()); }
-    let sql=tokio::fs::read_to_string(source).await.map_err(|e|format!("Cannot read backup: {e}"))?;
-    if !sql.contains("NATRA Management logical backup") || !sql.contains("BEGIN TRANSACTION;") || !sql.contains("COMMIT;") {
+    let source = source.trim();
+    if source.is_empty() {
+        return Err("Restore source is required".into());
+    }
+    let sql = tokio::fs::read_to_string(source)
+        .await
+        .map_err(|e| format!("Cannot read backup: {e}"))?;
+    if !sql.contains("NATRA Management logical backup")
+        || !sql.contains("BEGIN TRANSACTION;")
+        || !sql.contains("COMMIT;")
+    {
         return Err("The selected file is not a valid NATRA backup.".into());
     }
-    let c=conn(&state).await?;
-    c.execute_batch("PRAGMA foreign_keys=OFF;").await.map_err(|e|e.to_string())?;
-    c.execute_batch(&sql).await.map_err(|e|format!("Restore failed; database was not safely restored: {e}"))?;
-    c.execute_batch("PRAGMA foreign_keys=ON;").await.map_err(|e|e.to_string())?;
+    let c = conn(&state).await?;
+    c.execute_batch("PRAGMA foreign_keys=OFF;")
+        .await
+        .map_err(|e| e.to_string())?;
+    c.execute_batch(&sql)
+        .await
+        .map_err(|e| format!("Restore failed; database was not safely restored: {e}"))?;
+    c.execute_batch("PRAGMA foreign_keys=ON;")
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 async fn sync_status(state: State<'_, AppDb>) -> Result<serde_json::Value, String> {
     let c = conn(&state).await?;
-    let open: i64 = scalar_i64(&c, "SELECT COUNT(*) FROM sync_conflicts WHERE status='OPEN'").await?;
+    let open: i64 = scalar_i64(
+        &c,
+        "SELECT COUNT(*) FROM sync_conflicts WHERE status='OPEN'",
+    )
+    .await?;
     let db = state.db.lock().await;
-    let mode = match &*db { DbBackend::Synced(_) => "cloud", DbBackend::Local(_) => "local" };
+    let mode = match &*db {
+        DbBackend::Synced(_) => "cloud",
+        DbBackend::Local(_) => "local",
+    };
     Ok(serde_json::json!({"status":"ready","mode":mode,"open_conflicts":open}))
 }
-
 
 #[tauri::command]
 async fn get_cloud_sync_config() -> Result<serde_json::Value, String> {
@@ -987,7 +1381,12 @@ async fn set_session(state: State<'_, AppDb>, session: SessionInput) -> Result<(
 #[tauri::command]
 async fn clear_session(state: State<'_, AppDb>, user_id: String) -> Result<(), String> {
     let c = conn(&state).await?;
-    c.execute("DELETE FROM app_session WHERE id=1 AND user_id=?1", params![user_id]).await.map_err(|e| e.to_string())?;
+    c.execute(
+        "DELETE FROM app_session WHERE id=1 AND user_id=?1",
+        params![user_id],
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1000,43 +1399,79 @@ fn database_path(app: &AppHandle) -> PathBuf {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-      .setup(|app| {
-        let path=database_path(app.handle());
-        let path_string=path.to_string_lossy().to_string();
-        let (url, token) = cloud_credentials();
+        .setup(|app| {
+            let path = database_path(app.handle());
+            let path_string = path.to_string_lossy().to_string();
+            let (url, token) = cloud_credentials();
 
-        tauri::async_runtime::block_on(async {
-            let backend = match (url, token) {
-                (Some(url), Some(token)) => {
-                    let db=turso::sync::Builder::new_remote(&path_string)
-                        .with_remote_url(&url)
-                        .with_auth_token(&token)
-                        .bootstrap_if_empty(false)
-                        .build()
-                        .await
-                        .map_err(|e| format!("Cloud database initialization failed: {e}"))?;
-                    DbBackend::Synced(db)
-                }
-                _ => {
-                    let db=turso::Builder::new_local(&path_string)
-                        .build()
-                        .await
-                        .map_err(|e| format!("Local database initialization failed: {e}"))?;
-                    DbBackend::Local(db)
-                }
-            };
-            let c = match &backend {
-                DbBackend::Local(db) => db.connect().map_err(|e| e.to_string())?,
-                DbBackend::Synced(db) => db.connect().await.map_err(|e| e.to_string())?,
-            };
-            init_schema(&c).await?;
-            app.manage(AppDb{db:Arc::new(Mutex::new(backend))});
-            Ok::<(),String>(())
-        }).map_err(|e| e)?;
+            tauri::async_runtime::block_on(async {
+                let backend = match (url, token) {
+                    (Some(url), Some(token)) => {
+                        let db = turso::sync::Builder::new_remote(&path_string)
+                            .with_remote_url(&url)
+                            .with_auth_token(&token)
+                            .bootstrap_if_empty(false)
+                            .build()
+                            .await
+                            .map_err(|e| format!("Cloud database initialization failed: {e}"))?;
+                        DbBackend::Synced(db)
+                    }
+                    _ => {
+                        let db = turso::Builder::new_local(&path_string)
+                            .build()
+                            .await
+                            .map_err(|e| format!("Local database initialization failed: {e}"))?;
+                        DbBackend::Local(db)
+                    }
+                };
+                let c = match &backend {
+                    DbBackend::Local(db) => db.connect().map_err(|e| e.to_string())?,
+                    DbBackend::Synced(db) => db.connect().await.map_err(|e| e.to_string())?,
+                };
+                init_schema(&c).await?;
+                accounting::ensure_schema(&c).await?;
+                app.manage(AppDb {
+                    db: Arc::new(Mutex::new(backend)),
+                });
+                Ok::<(), String>(())
+            })
+            .map_err(|e| e)?;
 
-        Ok(())
-      })
-      .invoke_handler(tauri::generate_handler![list_products,save_product,delete_product,record_purchase,record_expense,dashboard_summary,record_sale,record_return,record_customer_payment,list_transactions,list_customers,save_customer,report_summary,sync_now,list_suppliers,create_supplier,backup_database,restore_database,sync_status,get_cloud_sync_config,configure_cloud_sync,list_categories,create_category,record_stock_adjustment,record_income,record_transfer,list_stock_movements,list_sales_history,list_purchase_history,set_session,clear_session])
-      .run(tauri::generate_context!())
-      .expect("error while running tauri application");
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_products,
+            save_product,
+            delete_product,
+            record_purchase,
+            record_expense,
+            dashboard_summary,
+            record_sale,
+            record_return,
+            record_customer_payment,
+            list_transactions,
+            list_customers,
+            save_customer,
+            report_summary,
+            sync_now,
+            list_suppliers,
+            create_supplier,
+            backup_database,
+            restore_database,
+            sync_status,
+            get_cloud_sync_config,
+            configure_cloud_sync,
+            list_categories,
+            create_category,
+            record_stock_adjustment,
+            record_income,
+            record_transfer,
+            list_stock_movements,
+            list_sales_history,
+            list_purchase_history,
+            set_session,
+            clear_session
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
