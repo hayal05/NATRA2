@@ -43,17 +43,16 @@ pub async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(),
     insert_journal(c, entry).await
 }
 
-/// Persists a validated journal inside the caller's Turso transaction.
-/// This keeps the journal and the related business operation atomic.
-pub async fn persist_journal_tx<'a>(tx: &Transaction<'a>, entry: &JournalEntry) -> Result<(), String> {
+/// Persists a validated journal through an existing Turso transaction.
+/// The explicit dereference keeps the helper independent of Turso's
+/// transaction lifetime while still executing all statements on the same
+/// transaction-backed connection.
+pub async fn persist_journal_tx(tx: &Transaction<'_>, entry: &JournalEntry) -> Result<(), String> {
     validate_entry(entry)?;
     insert_journal(tx, entry).await
 }
 
-async fn insert_journal<C>(c: &C, entry: &JournalEntry) -> Result<(), String>
-where
-    C: std::ops::Deref<Target = Connection>,
-{
+async fn insert_journal(c: &Connection, entry: &JournalEntry) -> Result<(), String> {
     c.execute(
         "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![
