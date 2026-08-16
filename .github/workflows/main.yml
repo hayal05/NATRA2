@@ -87,9 +87,7 @@ jobs:
           if ($text -notmatch 'accounting_persistence::ensure_schema\(&c\)\.await\?;') {
             $text = $text -replace 'init_schema\(&c\)\.await\?;', 'init_schema(&c).await?; accounting_persistence::ensure_schema(&c).await?;'
           }
-          $text = $text -replace ',record_return', ''
-          $text = $text -replace ',record_stock_adjustment', ''
-          $text = $text -replace ',record_transfer', ''
+          Write-Host "Preserving all frontend-facing commands; no command registrations are removed during CI repair."
           Set-Content -Path $path -Value $text -NoNewline -Encoding utf8
 
       - name: Commit source repair to main
