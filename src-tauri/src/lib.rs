@@ -1,4 +1,4 @@
-use chrono::Utc;
+﻿use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{env, path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager, State};
@@ -239,8 +239,80 @@ async fn list_suppliers(state: State<'_, AppDb>)->Result<serde_json::Value,Strin
 async fn create_supplier(state: State<'_, AppDb>, input: SupplierInput)->Result<i64,String>{let c=conn(&state).await?;let now=Utc::now().to_rfc3339();c.execute("INSERT INTO suppliers(name,phone,email,address,created_at,updated_at) VALUES (?,?,?,?,?,?)",params![input.name,input.phone,input.email,input.address,now.clone(),now]).await.map_err(|e|e.to_string())?;Ok(c.last_insert_rowid())}
 
 #[tauri::command]
-async fn backup_database(state: State<'_, AppDb>, destination:String)->Result<String,String>{let destination=destination.trim();if destination.is_empty(){return Err("Backup destination is required".into());}let c=conn(&state).await?;let mut sql=String::from("-- NATRA Management logical backup\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n");let mut tables=c.query("SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",()).await.map_err(|e|e.to_string())?;while let Some(r)=tables.next().await.map_err(|e|e.to_string())?{let name:String=r.get(0).map_err(|e|e.to_string())?;let ddl:String=r.get(1).map_err(|e|e.to_string())?;if ddl.trim().is_empty(){continue;}sql.push_str(&ddl);sql.push_str(";\n");let safe_name=name.replace('"',"\"\"");let mut data=c.query(&format!("SELECT * FROM \"{}\"",safe_name),()).await.map_err(|e|e.to_string())?;let columns=data.column_names();while let Some(row)=data.next().await.map_err(|e|e.to_string())?{let mut values=Vec::with_capacity(row.column_count());for i in 0..row.column_count(){let value=row.get_value(i).map_err(|e|e.to_string())?;let rendered=match value{turso::Value::Null=>"NULL".to_string(),turso::Value::Integer(v)=>v.to_string(),turso::Value::Real(v)=>v.to_string(),turso::Value::Text(v)=>format!("'{}'",v.replace('\'',"''")),turso::Value::Blob(v)=>format!("X'{}'",v.iter().map(|b|format!("{b:02X}")).collect::<String>()),};values.push(rendered);}sql.push_str(&format!("INSERT INTO \"{}\" ({}) VALUES ({});\n",safe_name,columns.iter().map(|c|format!("\"{}\"",c.replace('"',"\"\""))).collect::<Vec<_>>().join(","),values.join(",")));}}}sql.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");tokio::fs::write(destination,sql).await.map_err(|e|e.to_string())?;Ok(destination.to_string())}
+async fn backup_database(state: State<'_, AppDb>, destination: String) -> Result<String, String> {
+    let destination = destination.trim();
+    if destination.is_empty() {
+        return Err("Backup destination is required".into());
+    }
 
+    let c = conn(&state).await?;
+    let mut sql = String::from(
+        "-- NATRA Management logical backup\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n",
+    );
+
+    let mut tables = c
+        .query(
+            "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            (),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    while let Some(row) = tables.next().await.map_err(|e| e.to_string())? {
+        let name: String = row.get(0).map_err(|e| e.to_string())?;
+        let ddl: String = row.get(1).map_err(|e| e.to_string())?;
+        if ddl.trim().is_empty() {
+            continue;
+        }
+
+        sql.push_str(&ddl);
+        sql.push_str(";\n");
+
+        let safe_name = name.replace('"', "\"\"");
+        let query = format!("SELECT * FROM \"{}\"", safe_name);
+        let mut data = c.query(&query, ()).await.map_err(|e| e.to_string())?;
+        let columns = data.column_names();
+
+        while let Some(row) = data.next().await.map_err(|e| e.to_string())? {
+            let mut values = Vec::with_capacity(row.column_count());
+
+            for i in 0..row.column_count() {
+                let value = row.get_value(i).map_err(|e| e.to_string())?;
+                let rendered = match value {
+                    turso::Value::Null => "NULL".to_string(),
+                    turso::Value::Integer(v) => v.to_string(),
+                    turso::Value::Real(v) => v.to_string(),
+                    turso::Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+                    turso::Value::Blob(v) => format!(
+                        "X'{}'",
+                        v.iter().map(|b| format!("{b:02X}")).collect::<String>()
+                    ),
+                };
+                values.push(rendered);
+            }
+
+            let quoted_columns = columns
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            sql.push_str(&format!(
+                "INSERT INTO \"{}\" ({}) VALUES ({});\n",
+                safe_name,
+                quoted_columns,
+                values.join(",")
+            ));
+        }
+    }
+
+    sql.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
+    tokio::fs::write(destination, sql)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(destination.to_string())
+}
 #[tauri::command]
 async fn restore_database(state: State<'_, AppDb>, source:String)->Result<(),String>{let source=source.trim();if source.is_empty(){return Err("Restore source is required".into());}let sql=tokio::fs::read_to_string(source).await.map_err(|e|format!("Cannot read backup: {e}"))?;if !sql.contains("NATRA Management logical backup")||!sql.contains("BEGIN TRANSACTION;")||!sql.contains("COMMIT;"){return Err("The selected file is not a valid NATRA backup.".into());}let c=conn(&state).await?;c.execute_batch("PRAGMA foreign_keys=OFF;").await.map_err(|e|e.to_string())?;c.execute_batch(&sql).await.map_err(|e|format!("Restore failed; database was not safely restored: {e}"))?;c.execute_batch("PRAGMA foreign_keys=ON;").await.map_err(|e|e.to_string())?;Ok(())}
 
