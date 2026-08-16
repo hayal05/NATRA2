@@ -37,11 +37,12 @@ pub async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(),
     insert_journal(c, entry).await
 }
 
-pub async fn persist_journal_tx(tx: &Transaction<'_>, entry: &JournalEntry) -> Result<(), String> {
+/// Turso 0.7.2's public `Transaction` is a zero-lifetime type and does not
+/// dereference to `Connection`. Keep a transaction-specific writer instead of
+/// trying to coerce `&Transaction` into `&Connection`.
+pub async fn persist_journal_tx(tx: &Transaction, entry: &JournalEntry) -> Result<(), String> {
     validate_entry(entry)?;
-    // Transaction dereferences to its transaction-backed Connection. Explicitly
-    // dereference it here so Rust does not attempt an incompatible lifetime coercion.
-    insert_journal(&*tx, entry).await
+    insert_journal_tx(tx, entry).await
 }
 
 async fn insert_journal(c: &Connection, entry: &JournalEntry) -> Result<(), String> {
@@ -58,6 +59,26 @@ async fn insert_journal(c: &Connection, entry: &JournalEntry) -> Result<(), Stri
     }
 
     c.execute(
+        "INSERT INTO audit_log(actor,action,entity_type,entity_id,details,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
+        params!["local-user", "JOURNAL_POSTED", "JOURNAL_ENTRY", entry.reference.clone(), format!("event={:?};debit={};credit={}", entry.event_type, entry.total_debit(), entry.total_credit()), Utc::now().to_rfc3339()],
+    ).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn insert_journal_tx(tx: &Transaction, entry: &JournalEntry) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![entry.id.clone(), entry.reference.clone(), format!("{:?}", entry.event_type), entry.description.clone(), entry.posted_at.clone(), format!("{:?}", entry.status), entry.reversal_of.clone()],
+    ).await.map_err(|e| e.to_string())?;
+
+    for line in &entry.lines {
+        tx.execute(
+            "INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?1,?2,?3,?4)",
+            params![entry.id.clone(), line.account.clone(), line.debit, line.credit],
+        ).await.map_err(|e| e.to_string())?;
+    }
+
+    tx.execute(
         "INSERT INTO audit_log(actor,action,entity_type,entity_id,details,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
         params!["local-user", "JOURNAL_POSTED", "JOURNAL_ENTRY", entry.reference.clone(), format!("event={:?};debit={};credit={}", entry.event_type, entry.total_debit(), entry.total_credit()), Utc::now().to_rfc3339()],
     ).await.map_err(|e| e.to_string())?;
