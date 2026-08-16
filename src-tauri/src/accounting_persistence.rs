@@ -1,6 +1,6 @@
 use crate::accounting_core::JournalEntry;
 use chrono::Utc;
-use turso::{params, Connection};
+use turso::{params, Connection, Transaction};
 
 /// Creates the durable journal tables used by every posted business event.
 pub async fn ensure_schema(c: &Connection) -> Result<(), String> {
@@ -27,14 +27,33 @@ pub async fn ensure_schema(c: &Connection) -> Result<(), String> {
     "#).await.map_err(|e| e.to_string())
 }
 
-/// Persists a validated, already-balanced journal entry.
-/// The caller should invoke this using the same transaction as the related
-/// operational change so the accounting and operational state commit together.
-pub async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(), String> {
+fn validate_entry(entry: &JournalEntry) -> Result<(), String> {
     if !entry.is_balanced() {
         return Err("Cannot persist an unbalanced journal entry".into());
     }
+    if entry.reference.trim().is_empty() {
+        return Err("Journal reference is required".into());
+    }
+    Ok(())
+}
 
+/// Persists a validated journal using an existing connection.
+pub async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(), String> {
+    validate_entry(entry)?;
+    insert_journal(c, entry).await
+}
+
+/// Persists a validated journal inside the caller's Turso transaction.
+/// This keeps the journal and the related business operation atomic.
+pub async fn persist_journal_tx<'a>(tx: &Transaction<'a>, entry: &JournalEntry) -> Result<(), String> {
+    validate_entry(entry)?;
+    insert_journal(tx, entry).await
+}
+
+async fn insert_journal<C>(c: &C, entry: &JournalEntry) -> Result<(), String>
+where
+    C: std::ops::Deref<Target = Connection>,
+{
     c.execute(
         "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![
