@@ -2,7 +2,7 @@ use chrono::Utc;
 use crate::{accounting_persistence, sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
 use std::collections::HashSet;
 use tauri::State;
-use turso::{params, Transaction};
+use turso::params;
 use uuid::Uuid;
 
 fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str, String> {
@@ -30,7 +30,7 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
     }
 
     let mut c = super::conn(&state).await?;
-    let tx: Transaction = c.transaction().await.map_err(|e| e.to_string())?;
+    let tx = c.transaction().await.map_err(|e| e.to_string())?;
     let reference = format!("SAL-{}", Uuid::new_v4().simple());
     let now = Utc::now().to_rfc3339();
     let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine {
