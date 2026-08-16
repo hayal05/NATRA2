@@ -2,7 +2,7 @@ use chrono::Utc;
 use crate::{accounting_persistence, sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
 use std::collections::HashSet;
 use tauri::State;
-use turso::params;
+use turso::{params, Transaction};
 use uuid::Uuid;
 
 fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str, String> {
@@ -14,9 +14,6 @@ fn debit_account_for_payment_method(payment_method: &str) -> Result<&'static str
     }
 }
 
-/// Real application sales command. The UI contract remains `record_sale`.
-/// Sales Core produces the complete balanced journal; this command atomically
-/// persists that journal together with the operational sale and inventory data.
 #[tauri::command]
 pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<String, String> {
     if input.items.is_empty() { return Err("Sale has no items".into()); }
@@ -27,11 +24,13 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
     for item in &input.items {
         let sku = item.sku.trim();
         if sku.is_empty() { return Err("SKU is required".into()); }
+        if item.qty <= 0.0 || !item.qty.is_finite() { return Err(format!("Invalid quantity for {}", sku)); }
+        if item.unit_price < 0.0 || !item.unit_price.is_finite() { return Err(format!("Invalid unit price for {}", sku)); }
         if !seen.insert(sku.to_string()) { return Err(format!("Duplicate SKU in sale: {}", sku)); }
     }
 
     let mut c = super::conn(&state).await?;
-    let tx = c.transaction().await.map_err(|e| e.to_string())?;
+    let tx: Transaction = c.transaction().await.map_err(|e| e.to_string())?;
     let reference = format!("SAL-{}", Uuid::new_v4().simple());
     let now = Utc::now().to_rfc3339();
     let lines: Vec<SaleLine> = input.items.iter().map(|item| SaleLine {
@@ -45,6 +44,7 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
         let qty: f64 = row.get(0).map_err(|e| e.to_string())?;
         let unit_cost: f64 = row.get(1).map_err(|e| e.to_string())?;
         drop(rows);
+        if line.qty > qty { return Err(format!("Insufficient stock for {}", line.sku)); }
         opening_inventory.push((line.sku.clone(), InventoryState { qty, unit_cost }));
     }
 
