@@ -10,7 +10,7 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -20,6 +20,108 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+
+      - name: Repair backup command syntax
+        shell: powershell
+        run: |
+          $path = "src-tauri/src/lib.rs"
+          $text = Get-Content -Raw -Path $path
+          $pattern = '(?s)#\[tauri::command\]\s*async fn backup_database.*?(?=\r?\n#\[tauri::command\]\s*async fn restore_database)'
+          $replacement = @'
+          #[tauri::command]
+          async fn backup_database(state: State<'_, AppDb>, destination: String) -> Result<String, String> {
+              let destination = destination.trim();
+              if destination.is_empty() {
+                  return Err("Backup destination is required".into());
+              }
+
+              let c = conn(&state).await?;
+              let mut sql = String::from(
+                  "-- NATRA Management logical backup\nPRAGMA foreign_keys=OFF;\nBEGIN TRANSACTION;\n",
+              );
+
+              let mut tables = c
+                  .query(
+                      "SELECT name,sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                      (),
+                  )
+                  .await
+                  .map_err(|e| e.to_string())?;
+
+              while let Some(row) = tables.next().await.map_err(|e| e.to_string())? {
+                  let name: String = row.get(0).map_err(|e| e.to_string())?;
+                  let ddl: String = row.get(1).map_err(|e| e.to_string())?;
+                  if ddl.trim().is_empty() {
+                      continue;
+                  }
+
+                  sql.push_str(&ddl);
+                  sql.push_str(";\n");
+
+                  let safe_name = name.replace('"', "\"\"");
+                  let query = format!("SELECT * FROM \"{}\"", safe_name);
+                  let mut data = c.query(&query, ()).await.map_err(|e| e.to_string())?;
+                  let columns = data.column_names();
+
+                  while let Some(row) = data.next().await.map_err(|e| e.to_string())? {
+                      let mut values = Vec::with_capacity(row.column_count());
+
+                      for i in 0..row.column_count() {
+                          let value = row.get_value(i).map_err(|e| e.to_string())?;
+                          let rendered = match value {
+                              turso::Value::Null => "NULL".to_string(),
+                              turso::Value::Integer(v) => v.to_string(),
+                              turso::Value::Real(v) => v.to_string(),
+                              turso::Value::Text(v) => format!("'{}'", v.replace('\'', "''")),
+                              turso::Value::Blob(v) => format!(
+                                  "X'{}'",
+                                  v.iter().map(|b| format!("{b:02X}")).collect::<String>()
+                              ),
+                          };
+                          values.push(rendered);
+                      }
+
+                      let quoted_columns = columns
+                          .iter()
+                          .map(|c| format!("\"{}\"", c.replace('"', "\"\"")))
+                          .collect::<Vec<_>>()
+                          .join(",");
+
+                      sql.push_str(&format!(
+                          "INSERT INTO \"{}\" ({}) VALUES ({});\n",
+                          safe_name,
+                          quoted_columns,
+                          values.join(",")
+                      ));
+                  }
+              }
+
+              sql.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
+              tokio::fs::write(destination, sql)
+                  .await
+                  .map_err(|e| e.to_string())?;
+
+              Ok(destination.to_string())
+          }
+          '@
+
+          $newText = [regex]::Replace($text, $pattern, $replacement)
+          if ($newText -eq $text) {
+              throw "Could not locate backup_database command for repair."
+          }
+          Set-Content -Path $path -Value $newText -NoNewline -Encoding utf8
+
+      - name: Commit source repair to main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: powershell
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src-tauri/src/lib.rs
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "fix: repair backup database syntax [skip ci]"
+            git push origin HEAD:main
+          }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
