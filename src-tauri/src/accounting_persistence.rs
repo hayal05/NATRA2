@@ -1,6 +1,7 @@
 use crate::accounting_core::JournalEntry;
 use chrono::Utc;
-use turso::{params, Connection, Transaction};
+use turso::{params, Connection};
+use turso::transaction::Transaction;
 
 pub async fn ensure_schema(c: &Connection) -> Result<(), String> {
     c.execute_batch(r#"
@@ -37,10 +38,7 @@ pub async fn persist_journal(c: &Connection, entry: &JournalEntry) -> Result<(),
     insert_journal(c, entry).await
 }
 
-/// Turso 0.7.2's public `Transaction` is a zero-lifetime type and does not
-/// dereference to `Connection`. Keep a transaction-specific writer instead of
-/// trying to coerce `&Transaction` into `&Connection`.
-pub async fn persist_journal_tx(tx: &Transaction, entry: &JournalEntry) -> Result<(), String> {
+pub async fn persist_journal_tx(tx: &Transaction<'_>, entry: &JournalEntry) -> Result<(), String> {
     validate_entry(entry)?;
     insert_journal_tx(tx, entry).await
 }
@@ -65,7 +63,7 @@ async fn insert_journal(c: &Connection, entry: &JournalEntry) -> Result<(), Stri
     Ok(())
 }
 
-async fn insert_journal_tx(tx: &Transaction, entry: &JournalEntry) -> Result<(), String> {
+async fn insert_journal_tx(tx: &Transaction<'_>, entry: &JournalEntry) -> Result<(), String> {
     tx.execute(
         "INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![entry.id.clone(), entry.reference.clone(), format!("{:?}", entry.event_type), entry.description.clone(), entry.posted_at.clone(), format!("{:?}", entry.status), entry.reversal_of.clone()],
