@@ -1,4 +1,4 @@
-use chrono::Utc;
+﻿use chrono::Utc;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use std::{env, path::PathBuf, sync::Arc};
