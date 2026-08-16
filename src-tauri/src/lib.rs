@@ -1,4 +1,4 @@
-use chrono::Utc;
+﻿use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{env, path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager, State};
