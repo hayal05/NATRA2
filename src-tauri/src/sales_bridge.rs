@@ -1,5 +1,5 @@
 use chrono::Utc;
-use crate::{sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
+use crate::{accounting_persistence, sales_core::{post_sale, InventoryState, SaleLine}, AppDb, SaleInput};
 use std::collections::HashSet;
 use tauri::State;
 use turso::params;
@@ -49,33 +49,7 @@ pub async fn record_sale(state: State<'_, AppDb>, input: SaleInput) -> Result<St
     }
 
     let posting = post_sale(reference.clone(), now.clone(), &lines, debit_account, "4000-SALES", "1200-INVENTORY", "5000-COGS", &opening_inventory)?;
-
-    tx.execute_batch(r#"
-      CREATE TABLE IF NOT EXISTS journal_entries (
-        id TEXT PRIMARY KEY,
-        reference TEXT NOT NULL UNIQUE,
-        event_type TEXT NOT NULL,
-        description TEXT NOT NULL,
-        posted_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        reversal_of TEXT
-      );
-      CREATE TABLE IF NOT EXISTS journal_lines (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        journal_id TEXT NOT NULL REFERENCES journal_entries(id),
-        account TEXT NOT NULL,
-        debit REAL NOT NULL DEFAULT 0,
-        credit REAL NOT NULL DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS idx_journal_entries_reference ON journal_entries(reference);
-      CREATE INDEX IF NOT EXISTS idx_journal_lines_journal ON journal_lines(journal_id);
-      CREATE INDEX IF NOT EXISTS idx_journal_lines_account ON journal_lines(account);
-    "#).await.map_err(|e| e.to_string())?;
-
-    tx.execute("INSERT INTO journal_entries(id,reference,event_type,description,posted_at,status,reversal_of) VALUES(?,?,?,?,?,?,?)", params![posting.journal.id.clone(),posting.journal.reference.clone(),format!("{:?}",posting.journal.event_type),posting.journal.description.clone(),posting.journal.posted_at.clone(),format!("{:?}",posting.journal.status),posting.journal.reversal_of.clone()]).await.map_err(|e| e.to_string())?;
-    for line in &posting.journal.lines {
-        tx.execute("INSERT INTO journal_lines(journal_id,account,debit,credit) VALUES(?,?,?,?)", params![posting.journal.id.clone(),line.account.clone(),line.debit,line.credit]).await.map_err(|e| e.to_string())?;
-    }
+    accounting_persistence::persist_journal_tx(&tx, &posting.journal).await?;
 
     tx.execute("INSERT INTO sales(reference,sale_date,subtotal,revenue,cogs,profit,payment_method,status) VALUES(?,?,?,?,?,?,?,?)", params![reference.clone(),now.clone(),posting.total_revenue,posting.total_revenue,posting.total_cogs,posting.total_revenue-posting.total_cogs,payment_method,"POSTED"]).await.map_err(|e| e.to_string())?;
     let sale_id = tx.last_insert_rowid();
