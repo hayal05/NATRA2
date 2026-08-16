@@ -111,6 +111,26 @@ jobs:
           }
           Set-Content -Path $path -Value $newText -NoNewline -Encoding utf8
 
+      - name: Apply accounting foundation and retire removed commands
+        shell: powershell
+        run: |
+          $path = "src-tauri/src/lib.rs"
+          $text = Get-Content -Raw -Path $path
+
+          if ($text -notmatch '(?m)^mod accounting_persistence;') {
+            $text = $text -replace '(?m)^mod accounting_core;\r?\n', "mod accounting_core;`r`nmod accounting_persistence;`r`n"
+          }
+
+          if ($text -notmatch 'accounting_persistence::ensure_schema\(&c\)\.await\?;') {
+            $text = $text -replace 'init_schema\(&c\)\.await\?;', 'init_schema(&c).await?; accounting_persistence::ensure_schema(&c).await?;'
+          }
+
+          $text = $text -replace ',record_return', ''
+          $text = $text -replace ',record_stock_adjustment', ''
+          $text = $text -replace ',record_transfer', ''
+
+          Set-Content -Path $path -Value $text -NoNewline -Encoding utf8
+
       - name: Commit source repair to main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: powershell
@@ -119,7 +139,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src-tauri/src/lib.rs
           if (-not (git diff --cached --quiet)) {
-            git commit -m "fix: repair backup database syntax [skip ci]"
+            git commit -m "feat: initialize accounting journal foundation [skip ci]"
             git push origin HEAD:main
           }
 
